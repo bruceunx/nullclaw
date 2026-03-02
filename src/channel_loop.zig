@@ -29,6 +29,17 @@ const Atomic = @import("portable_atomic.zig").Atomic;
 
 const log = std.log.scoped(.channel_loop);
 
+/// Set ScheduleTool's default chat_id for delivery context.
+fn setScheduleToolContext(tools: []const tools_mod.Tool, chat_id: []const u8) void {
+    for (tools) |tool| {
+        if (std.mem.eql(u8, tool.name(), "schedule")) {
+            const schedule_tool: *tools_mod.schedule.ScheduleTool = @ptrCast(@alignCast(tool.ptr));
+            schedule_tool.setContext("telegram", chat_id);
+            break;
+        }
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Parallel Message Processing
 // ════════════════════════════════════════════════════════════════════════════
@@ -53,6 +64,9 @@ const MessageTask = struct {
         const typing_target = task.sender;
         task.tg_ptr.startTyping(typing_target) catch {};
         defer task.tg_ptr.stopTyping(typing_target) catch {};
+
+        // Set ScheduleTool context for delivery
+        setScheduleToolContext(task.runtime.tools, task.sender);
 
         // Build conversation context for Telegram
         const conversation_context: ?ConversationContext = .{
@@ -598,6 +612,9 @@ pub fn runTelegramLoop(
                 const typing_target = msg.sender;
                 tg_ptr.startTyping(typing_target) catch {};
                 defer tg_ptr.stopTyping(typing_target) catch {};
+
+                // Set ScheduleTool context for delivery
+                setScheduleToolContext(runtime.tools, msg.sender);
 
                 // Build conversation context for Telegram
                 const conversation_context: ?ConversationContext = .{

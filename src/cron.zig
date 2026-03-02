@@ -1129,6 +1129,31 @@ fn loadJobsWithPolicy(scheduler: *CronScheduler, policy: LoadPolicy) !void {
             break :blk false;
         };
 
+        // Load delivery config
+        const delivery_mode = blk: {
+            if (obj.get("delivery_mode")) |v| {
+                if (v == .string) {
+                    if (std.mem.eql(u8, v.string, "always")) break :blk DeliveryMode.always;
+                    if (std.mem.eql(u8, v.string, "on_success")) break :blk DeliveryMode.on_success;
+                    if (std.mem.eql(u8, v.string, "on_error")) break :blk DeliveryMode.on_error;
+                    if (std.mem.eql(u8, v.string, "none")) break :blk DeliveryMode.none;
+                }
+            }
+            break :blk DeliveryMode.none;
+        };
+        const delivery_channel = blk: {
+            if (obj.get("delivery_channel")) |v| {
+                if (v == .string) break :blk v.string;
+            }
+            break :blk null;
+        };
+        const delivery_to = blk: {
+            if (obj.get("delivery_to")) |v| {
+                if (v == .string) break :blk v.string;
+            }
+            break :blk null;
+        };
+
         try scheduler.jobs.append(scheduler.allocator, .{
             .id = try scheduler.allocator.dupe(u8, id),
             .expression = try scheduler.allocator.dupe(u8, expression),
@@ -1141,6 +1166,11 @@ fn loadJobsWithPolicy(scheduler: *CronScheduler, policy: LoadPolicy) !void {
             .model = if (model) |m| try scheduler.allocator.dupe(u8, m) else null,
             .enabled = enabled,
             .delete_after_run = delete_after_run,
+            .delivery = .{
+                .mode = delivery_mode,
+                .channel = if (delivery_channel) |c| try scheduler.allocator.dupe(u8, c) else null,
+                .to = if (delivery_to) |t| try scheduler.allocator.dupe(u8, t) else null,
+            },
         });
     }
 }
@@ -1199,6 +1229,10 @@ const JsonCronJob = struct {
     last_status: ?[]const u8,
     paused: bool,
     one_shot: bool,
+    // Delivery config for notifications
+    delivery_mode: ?[]const u8 = null,
+    delivery_channel: ?[]const u8 = null,
+    delivery_to: ?[]const u8 = null,
 };
 
 /// Get the default cron.json path: ~/.nullclaw/cron.json
@@ -1285,6 +1319,25 @@ pub fn saveJobs(scheduler: *const CronScheduler) !void {
         try buf.appendSlice(scheduler.allocator, ",");
         try json_util.appendJsonKey(&buf, scheduler.allocator, "delete_after_run");
         try buf.appendSlice(scheduler.allocator, if (job.delete_after_run) "true" else "false");
+
+        // Delivery config for notifications
+        try buf.appendSlice(scheduler.allocator, ",");
+        try json_util.appendJsonKey(&buf, scheduler.allocator, "delivery_mode");
+        try json_util.appendJsonString(&buf, scheduler.allocator, job.delivery.mode.asStr());
+        try buf.appendSlice(scheduler.allocator, ",");
+        try json_util.appendJsonKey(&buf, scheduler.allocator, "delivery_channel");
+        if (job.delivery.channel) |channel| {
+            try json_util.appendJsonString(&buf, scheduler.allocator, channel);
+        } else {
+            try buf.appendSlice(scheduler.allocator, "null");
+        }
+        try buf.appendSlice(scheduler.allocator, ",");
+        try json_util.appendJsonKey(&buf, scheduler.allocator, "delivery_to");
+        if (job.delivery.to) |to| {
+            try json_util.appendJsonString(&buf, scheduler.allocator, to);
+        } else {
+            try buf.appendSlice(scheduler.allocator, "null");
+        }
 
         try buf.appendSlice(scheduler.allocator, "}");
     }

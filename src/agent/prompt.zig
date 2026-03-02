@@ -251,9 +251,31 @@ pub fn buildSystemPrompt(
                 try w.writeAll("- \"Anyone online?\" -> `[NO_REPLY]` (unless you're specifically needed)\n");
                 try w.writeAll("- \"lol\" / \"haha\" / emoji reactions -> `[NO_REPLY]`\n");
                 try w.writeAll("- General chit-chat between other members -> `[NO_REPLY]`\n\n");
+
+                // Add schedule tool guidance for group chats
+                try w.writeAll("## Scheduled Tasks in Groups\n\n");
+                try w.writeAll("When using the `schedule` tool to create reminders in this group:\n");
+                try w.writeAll("1. Use SIMPLE command like: `echo \"Time is up!\"` or `date`\n");
+                try w.writeAll("2. ALWAYS use double quotes (\") for the command string, not single quotes\n");
+                try w.writeAll("3. The system will AUTOMATICALLY send the result to this group\n");
+                try w.writeAll("4. DO NOT use curl, say, or other methods to send messages manually\n");
+                try w.writeAll("5. DO NOT add any extra commands - just the basic echo\n\n");
+                if (cc.group_id) |gid| {
+                    try std.fmt.format(w, "Current group ID: `{s}`\n\n", .{gid});
+                }
+                try w.writeAll("Good example (simple, double quotes):\n");
+                try w.writeAll("```\nschedule action=once delay=30m command=\"echo \\\"Time is up!\\\"\"\n```\n\n");
+                try w.writeAll("The command output will be automatically delivered to this chat.\n\n");
             }
         }
     }
+
+    // Schedule tool guidance for all contexts (including private chats)
+    try w.writeAll("## Scheduled Tasks\n\n");
+    try w.writeAll("When using the `schedule` tool to create reminders:\n");
+    try w.writeAll("- ALWAYS use double quotes (\") for the command string\n");
+    try w.writeAll("- Example: `echo \"Time is up!\"`\n");
+    try w.writeAll("- The system will automatically send results to the current chat\n\n");
 
     // Skills section
     try appendSkillsSection(allocator, w, ctx.workspace_dir);
