@@ -65,11 +65,19 @@ fn parseCommand(arg: []const u8) ?Command {
     return command_map.get(arg);
 }
 
-pub fn main() !void {
-    // Enable UTF-8 output on Windows console (fixes Cyrillic/Unicode garbling)
+extern "kernel32" fn SetConsoleCP(wCodePageID: std.os.windows.UINT) callconv(.winapi) std.os.windows.BOOL;
+
+fn configureWindowsConsoleUtf8() void {
     if (comptime builtin.os.tag == .windows) {
+        // Set both output and input code pages to UTF-8 so interactive
+        // terminal sessions preserve non-ASCII user input.
         _ = std.os.windows.kernel32.SetConsoleOutputCP(65001);
+        _ = SetConsoleCP(65001);
     }
+}
+
+pub fn main() !void {
+    configureWindowsConsoleUtf8();
 
     const allocator = std.heap.smp_allocator;
 
@@ -2557,6 +2565,11 @@ test "parse known commands" {
     try std.testing.expectEqual(.update, parseCommand("update").?);
     try std.testing.expect(parseCommand("daemon") == null);
     try std.testing.expect(parseCommand("unknown") == null);
+}
+
+test "configureWindowsConsoleUtf8 is safe to call" {
+    configureWindowsConsoleUtf8();
+    try std.testing.expect(true);
 }
 
 test "parsePositiveUsize accepts only positive integers" {
