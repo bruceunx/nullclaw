@@ -263,6 +263,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .web_search_provider = cfg.http_request.search_provider,
         .web_search_fallback_providers = cfg.http_request.search_fallback_providers,
         .browser_enabled = cfg.browser.enabled,
+        .screenshot_enabled = true,
         .mcp_tools = mcp_tools,
         .agents = cfg.agents,
         .fallback_api_key = resolved_api_key,
