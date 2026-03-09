@@ -57,6 +57,52 @@ Build output:
 
 - `zig-out/bin/nullclaw`
 
+## Option 3: Android / Termux
+
+NullClaw does not currently publish official pre-built Android / Termux binaries.
+
+There are two different paths:
+
+- build directly inside Termux on the Android device
+- cross-compile an Android binary from another machine
+
+### Termux native build
+
+```bash
+pkg update
+pkg install git zig
+git clone https://github.com/nullclaw/nullclaw.git
+cd nullclaw
+zig version
+zig build -Doptimize=ReleaseSmall
+./zig-out/bin/nullclaw --help
+```
+
+Notes:
+
+- Use **Zig 0.15.2** exactly.
+- If `zig build` fails immediately, verify the Zig version first.
+- This uses the native target of the current Termux environment, so you usually do **not** need `-Dtarget`.
+- On Android / Termux, prefer foreground use first (`agent`, `gateway`) before trying to manage it as a background service.
+- If you want a packaged Android / Termux binary in releases, track the open request in `nullclaw/nullclaw#396`.
+
+### Cross-compiling for Android
+
+If you are building on another machine for a Termux / Android device, pass an explicit Zig target:
+
+```bash
+zig build -Dtarget=aarch64-linux-android -Doptimize=ReleaseSmall
+```
+
+Common Android targets:
+
+- `aarch64-linux-android`
+- `arm-linux-androideabi`
+- `x86_64-linux-android`
+
+Use the target that matches the phone or emulator architecture.
+- If you want a packaged Android / Termux binary in releases, track the open request in `nullclaw/nullclaw#396`.
+
 ## Add Binary to PATH
 
 ### macOS/Linux (zsh/bash)
