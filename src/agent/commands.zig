@@ -272,6 +272,10 @@ fn invalidateSystemPromptCache(self: anytype) void {
     if (@hasField(@TypeOf(self.*), "system_prompt_has_conversation_context")) {
         self.system_prompt_has_conversation_context = false;
     }
+    if (@hasField(@TypeOf(self.*), "system_prompt_model_name")) {
+        if (self.system_prompt_model_name) |model_name| self.allocator.free(model_name);
+        self.system_prompt_model_name = null;
+    }
 }
 
 test "configPrimaryModelForSelection treats unknown leading segment as model for default provider" {
@@ -2502,6 +2506,10 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
             clearSessionState(self);
             if (cmd.arg.len > 0) {
                 try setModelName(self, cmd.arg);
+                if (@hasField(@TypeOf(self.*), "model_pinned_by_user")) {
+                    self.model_pinned_by_user = true;
+                }
+                invalidateSystemPromptCache(self);
                 return try std.fmt.allocPrint(self.allocator, "Session cleared. Switched to model: {s}", .{cmd.arg});
             }
             return try self.allocator.dupe(u8, "Session cleared.");
@@ -2511,6 +2519,10 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
             resetRuntimeCommandState(self);
             if (cmd.arg.len > 0) {
                 try setModelName(self, cmd.arg);
+                if (@hasField(@TypeOf(self.*), "model_pinned_by_user")) {
+                    self.model_pinned_by_user = true;
+                }
+                invalidateSystemPromptCache(self);
                 return try std.fmt.allocPrint(self.allocator, "Session restarted. Switched to model: {s}", .{cmd.arg});
             }
             return try self.allocator.dupe(u8, "Session restarted.");
@@ -2525,7 +2537,31 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
             {
                 return try self.formatModelStatus();
             }
+            if (std.ascii.eqlIgnoreCase(cmd.arg, "auto")) {
+                if (@hasField(@TypeOf(self.*), "model_pinned_by_user")) {
+                    self.model_pinned_by_user = false;
+                }
+                if (@hasField(@TypeOf(self.*), "default_model")) {
+                    try setModelName(self, self.default_model);
+                }
+                invalidateSystemPromptCache(self);
+                if (@hasField(@TypeOf(self.*), "model_routes") and self.model_routes.len == 0) {
+                    return try std.fmt.allocPrint(
+                        self.allocator,
+                        "Automatic model routing is not configured. Reverted to the configured default model: {s}",
+                        .{self.model_name},
+                    );
+                }
+                return try std.fmt.allocPrint(
+                    self.allocator,
+                    "Automatic model routing enabled. Reverted to the configured default model: {s}",
+                    .{self.model_name},
+                );
+            }
             try setModelName(self, cmd.arg);
+            if (@hasField(@TypeOf(self.*), "model_pinned_by_user")) {
+                self.model_pinned_by_user = true;
+            }
             if (@hasField(@TypeOf(self.*), "default_model")) {
                 self.default_model = self.model_name;
             }
