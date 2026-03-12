@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Config = @import("config.zig").Config;
+const config_types = @import("config_types.zig");
 const telegram = @import("channels/telegram.zig");
 const session_mod = @import("session.zig");
 const ConversationContext = @import("agent/prompt.zig").ConversationContext;
@@ -124,18 +125,46 @@ fn resolveTelegramBaseRouteKey(
     config: *const Config,
     account_id: []const u8,
     peer_id: []const u8,
+    thread_id: ?i64,
     is_group: bool,
 ) ![]const u8 {
-    const route = try agent_routing.resolveRouteWithSession(allocator, .{
+    const peer_kind: agent_routing.ChatType = if (is_group) .group else .direct;
+    var topic_peer_id: ?[]u8 = null;
+    defer if (topic_peer_id) |owned| allocator.free(owned);
+
+    const route = try agent_routing.resolveRoute(allocator, .{
         .channel = "telegram",
         .account_id = account_id,
         .peer = .{
-            .kind = if (is_group) .group else .direct,
+            .kind = peer_kind,
+            .id = if (is_group and thread_id != null) blk: {
+                topic_peer_id = try std.fmt.allocPrint(allocator, "{s}:thread:{d}", .{ peer_id, thread_id.? });
+                break :blk topic_peer_id.?;
+            } else peer_id,
+        },
+        .parent_peer = if (is_group and thread_id != null)
+            .{
+                .kind = peer_kind,
+                .id = peer_id,
+            }
+        else
+            null,
+    }, config.agent_bindings, config.agents);
+    defer allocator.free(route.session_key);
+    allocator.free(route.main_session_key);
+
+    return agent_routing.buildSessionKeyWithScope(
+        allocator,
+        route.agent_id,
+        "telegram",
+        .{
+            .kind = peer_kind,
             .id = peer_id,
         },
-    }, config.agent_bindings, config.agents, config.session);
-    allocator.free(route.main_session_key);
-    return route.session_key;
+        config.session.dm_scope,
+        account_id,
+        config.session.identity_links,
+    );
 }
 
 fn buildTelegramFallbackSessionKey(
@@ -173,6 +202,14 @@ fn buildThreadedSessionKeyIfNeeded(
     return base_key;
 }
 
+fn buildLegacyTelegramTopicSessionKey(
+    allocator: std.mem.Allocator,
+    base_key: []const u8,
+    thread_id: i64,
+) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}#topic:{d}", .{ base_key, thread_id });
+}
+
 pub fn resolveTelegramSessionKey(
     allocator: std.mem.Allocator,
     session_mgr: *session_mod.SessionManager,
@@ -184,16 +221,17 @@ pub fn resolveTelegramSessionKey(
     const base_peer_id = if (is_group) telegram.targetChatId(sender) else sender;
     const thread_id = if (is_group) telegram.targetThreadId(sender) else null;
 
-    const canonical_base = resolveTelegramBaseRouteKey(allocator, config, account_id, base_peer_id, is_group) catch
+    const canonical_base = resolveTelegramBaseRouteKey(allocator, config, account_id, base_peer_id, thread_id, is_group) catch
         try buildTelegramFallbackSessionKey(allocator, account_id, base_peer_id, null);
+    const legacy_key: ?[]u8 = if (thread_id) |tid|
+        try buildLegacyTelegramTopicSessionKey(allocator, canonical_base, tid)
+    else
+        null;
+    defer if (legacy_key) |key| allocator.free(key);
+
     const canonical_key = try buildThreadedSessionKeyIfNeeded(allocator, canonical_base, thread_id);
 
-    if (thread_id != null) {
-        const legacy_key = resolveTelegramBaseRouteKey(allocator, config, account_id, sender, is_group) catch
-            try buildTelegramFallbackSessionKey(allocator, account_id, sender, null);
-        defer allocator.free(legacy_key);
-        session_mgr.migrateLegacySessionKey(canonical_key, legacy_key);
-    }
+    if (legacy_key) |key| session_mgr.migrateLegacySessionKey(canonical_key, key);
 
     return canonical_key;
 }
@@ -1691,6 +1729,73 @@ test "parseTelegramSessionTargetFromKey handles canonical telegram fallback thre
     const parsed = parseTelegramSessionTargetFromKey("telegram:main:-100123:thread:77") orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("-100123", parsed.base_chat_id);
     try std.testing.expectEqual(@as(?i64, 77), parsed.thread_id);
+}
+
+test "resolveTelegramBaseRouteKey matches topic-specific telegram binding before group fallback" {
+    const allocator = std.testing.allocator;
+    const agents = [_]config_types.NamedAgentConfig{
+        .{ .name = "default", .provider = "openai", .model = "gpt-4" },
+        .{ .name = "group-agent", .provider = "openai", .model = "gpt-4" },
+        .{ .name = "topic-agent", .provider = "openai", .model = "gpt-4" },
+    };
+    const bindings = [_]agent_routing.AgentBinding{
+        .{
+            .agent_id = "group-agent",
+            .match = .{
+                .channel = "telegram",
+                .account_id = "main",
+                .peer = .{ .kind = .group, .id = "-100123" },
+            },
+        },
+        .{
+            .agent_id = "topic-agent",
+            .match = .{
+                .channel = "telegram",
+                .account_id = "main",
+                .peer = .{ .kind = .group, .id = "-100123:thread:77" },
+            },
+        },
+    };
+    const cfg = Config{
+        .workspace_dir = "/tmp/nullclaw",
+        .config_path = "/tmp/nullclaw/config.json",
+        .allocator = allocator,
+        .agents = &agents,
+        .agent_bindings = &bindings,
+    };
+
+    const key = try resolveTelegramBaseRouteKey(allocator, &cfg, "main", "-100123", 77, true);
+    defer allocator.free(key);
+
+    try std.testing.expectEqualStrings("agent:topic-agent:telegram:group:-100123", key);
+}
+
+test "resolveTelegramBaseRouteKey falls back to base telegram group binding for unmatched topic" {
+    const allocator = std.testing.allocator;
+    const agents = [_]config_types.NamedAgentConfig{
+        .{ .name = "default", .provider = "openai", .model = "gpt-4" },
+        .{ .name = "group-agent", .provider = "openai", .model = "gpt-4" },
+    };
+    const bindings = [_]agent_routing.AgentBinding{.{
+        .agent_id = "group-agent",
+        .match = .{
+            .channel = "telegram",
+            .account_id = "main",
+            .peer = .{ .kind = .group, .id = "-100123" },
+        },
+    }};
+    const cfg = Config{
+        .workspace_dir = "/tmp/nullclaw",
+        .config_path = "/tmp/nullclaw/config.json",
+        .allocator = allocator,
+        .agents = &agents,
+        .agent_bindings = &bindings,
+    };
+
+    const key = try resolveTelegramBaseRouteKey(allocator, &cfg, "main", "-100123", 77, true);
+    defer allocator.free(key);
+
+    try std.testing.expectEqualStrings("agent:group-agent:telegram:group:-100123", key);
 }
 
 test "telegram update offset store roundtrip" {

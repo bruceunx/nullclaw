@@ -463,6 +463,39 @@ Config: `~/.nullclaw/config.json` (created by `onboard`)
 }
 ```
 
+Telegram forum topics:
+
+- Topic session isolation is automatic. You do not add a `topic_id` field under `channels.telegram`.
+- To bind a specific Telegram forum topic to a specific agent, use `bindings[].match.peer.id` with the canonical thread form `"<chat_id>:thread:<topic_id>"`.
+- To bind the whole Telegram group as a fallback for all other topics, keep a normal group binding with `"<chat_id>"`.
+
+Example:
+
+```json
+{
+  "bindings": [
+    {
+      "agent_id": "coder",
+      "match": {
+        "channel": "telegram",
+        "account_id": "main",
+        "peer": { "kind": "group", "id": "-1001234567890:thread:42" }
+      }
+    },
+    {
+      "agent_id": "orchestrator",
+      "match": {
+        "channel": "telegram",
+        "account_id": "main",
+        "peer": { "kind": "group", "id": "-1001234567890" }
+      }
+    }
+  ]
+}
+```
+
+In that setup, topic `42` routes to `coder`, while the rest of the forum falls back to `orchestrator`.
+
 ### Full Web Search + Shell Access
 
 Use this when you want full web-search provider control plus unrestricted shell command allowlist behavior:

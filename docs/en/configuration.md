@@ -181,6 +181,39 @@ Telegram example:
 }
 ```
 
+Telegram forum topics:
+
+- Topic session isolation is automatic; there is no separate `topic_id` field under `channels.telegram`.
+- If you want a specific forum topic to use a specific agent, configure it in `bindings` with `match.peer.id = "<chat_id>:thread:<topic_id>"`.
+- If you also want a fallback agent for the rest of the same Telegram group, add another binding for the plain group id `"<chat_id>"`.
+
+Example:
+
+```json
+{
+  "bindings": [
+    {
+      "agent_id": "coder",
+      "match": {
+        "channel": "telegram",
+        "account_id": "main",
+        "peer": { "kind": "group", "id": "-1001234567890:thread:42" }
+      }
+    },
+    {
+      "agent_id": "orchestrator",
+      "match": {
+        "channel": "telegram",
+        "account_id": "main",
+        "peer": { "kind": "group", "id": "-1001234567890" }
+      }
+    }
+  ]
+}
+```
+
+In that setup, topic `42` routes to `coder`, while the rest of the forum falls back to `orchestrator`.
+
 Rules:
 
 - `allow_from: []` means deny all inbound messages.
