@@ -84,6 +84,7 @@ Notes:
 - This uses the native target of the current Termux environment, so you usually do **not** need `-Dtarget`.
 - On Android / Termux, prefer foreground use first (`agent`, `gateway`) before trying to manage it as a background service.
 - Official releases publish pre-built Android / Termux binaries for `aarch64`, `armv7`, and `x86_64`.
+- For the fuller Android / Termux path, including troubleshooting, see [Termux Guide](./termux.md).
 
 ### Cross-compiling for Android
 
@@ -160,6 +161,7 @@ brew uninstall nullclaw
 ## Related Pages
 
 - [README](./README.md)
+- [Termux Guide](./termux.md)
 - [Configuration](./configuration.md)
 - [Usage and Operations](./usage.md)
 - [Commands](./commands.md)

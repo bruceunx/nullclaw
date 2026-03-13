@@ -43,6 +43,50 @@ zig build test --summary all
 
 - `zig-out/bin/nullclaw`
 
+## 方式三：Android / Termux
+
+Android / Termux 一般有三种路径：
+
+- 直接下载 release 里的 Android / Termux 预编译二进制
+- 在手机的 Termux 里原生构建
+- 在别的机器上交叉编译 Android 二进制
+
+### Termux 原生构建
+
+```bash
+pkg update
+pkg install git zig
+git clone https://github.com/nullclaw/nullclaw.git
+cd nullclaw
+zig version
+zig build -Doptimize=ReleaseSmall
+./zig-out/bin/nullclaw --help
+```
+
+说明：
+
+- 必须使用 **Zig 0.15.2**。
+- 如果 `zig build` 一开始就失败，先检查 Zig 版本。
+- 在原生 Termux 环境里，一般 **不需要** 传 `-Dtarget`。
+- 在 Android / Termux 上，建议优先以前台方式验证（`agent`、`gateway`），再考虑后台常驻。
+- 更完整的说明和排错见 [Termux 指南](./termux.md)。
+
+### 为 Android 交叉编译
+
+如果你是在另一台机器上为 Android / Termux 设备构建：
+
+```bash
+zig build -Dtarget=aarch64-linux-android.24 -Doptimize=ReleaseSmall
+```
+
+常见目标：
+
+- `aarch64-linux-android.24`
+- `arm-linux-androideabi.24` 搭配 `-Dcpu=baseline+v7a`
+- `x86_64-linux-android.24`
+
+按设备架构选择对应目标即可。
+
 ## 将二进制加入 PATH
 
 ### macOS/Linux（zsh/bash）
@@ -101,6 +145,7 @@ brew uninstall nullclaw
 ## 相关页面
 
 - [中文文档入口](./README.md)
+- [Termux 指南](./termux.md)
 - [配置指南](./configuration.md)
 - [使用与运维](./usage.md)
 - [命令参考](./commands.md)
