@@ -27,6 +27,7 @@ const onboard = @import("onboard.zig");
 const streaming = @import("streaming.zig");
 const ConversationContext = @import("agent/prompt.zig").ConversationContext;
 const thread_stacks = @import("thread_stacks.zig");
+const tunnel_mod = @import("tunnel.zig");
 
 const log = std.log.scoped(.daemon);
 
@@ -55,6 +56,8 @@ pub const DaemonState = struct {
     gateway_port: u16 = 3000,
     components: [MAX_COMPONENTS]?ComponentStatus = .{null} ** MAX_COMPONENTS,
     component_count: usize = 0,
+    tunnel_provider: []const u8 = "none",
+    tunnel_url: ?[]const u8 = null,
 
     pub fn addComponent(self: *DaemonState, name: []const u8) void {
         if (self.component_count < MAX_COMPONENTS) {
@@ -106,6 +109,14 @@ pub fn writeStateFile(allocator: std.mem.Allocator, path: []const u8, state: *co
     try buf.appendSlice(allocator, "{\n");
     try buf.appendSlice(allocator, "  \"status\": \"running\",\n");
     try std.fmt.format(buf.writer(allocator), "  \"gateway\": \"{s}:{d}\",\n", .{ state.gateway_host, state.gateway_port });
+
+    // Tunnel info
+    try std.fmt.format(buf.writer(allocator), "  \"tunnel_provider\": \"{s}\",\n", .{state.tunnel_provider});
+    if (state.tunnel_url) |url| {
+        try std.fmt.format(buf.writer(allocator), "  \"tunnel_url\": \"{s}\",\n", .{url});
+    } else {
+        try buf.appendSlice(allocator, "  \"tunnel_url\": null,\n");
+    }
 
     // Components array
     try buf.appendSlice(allocator, "  \"components\": [\n");
@@ -916,11 +927,42 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
 
     state.addComponent("scheduler");
 
+    // Start tunnel if configured (before gateway so URL is available for webhooks)
+    var tunnel: ?tunnel_mod.Tunnel = null;
+    if (!std.mem.eql(u8, config.tunnel.provider, "none")) {
+        const tunnel_cfg = tunnel_mod.TunnelFullConfig{
+            .provider = config.tunnel.provider,
+            .cloudflare = if (config.tunnel.cloudflare) |cf| .{ .token = cf.token } else null,
+            .ngrok = if (config.tunnel.ngrok) |ng| .{ .auth_token = ng.auth_token, .domain = ng.domain } else null,
+            .tailscale = if (config.tunnel.tailscale) |ts| .{ .funnel = ts.funnel, .hostname = ts.hostname } else null,
+            .custom = if (config.tunnel.custom) |cst| .{ .start_command = cst.start_command, .health_url = cst.health_url, .url_pattern = cst.url_pattern } else null,
+        };
+        tunnel = tunnel_mod.createTunnel(tunnel_cfg) catch |err| blk: {
+            log.warn("Failed to create tunnel: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (tunnel) |*t| {
+            t.allocator = allocator;
+            if (t.start(host, port)) |url| {
+                state.tunnel_provider = config.tunnel.provider;
+                state.tunnel_url = url;
+                health.markComponentOk("tunnel");
+            } else |err| {
+                log.warn("Failed to start tunnel: {s}", .{@errorName(err)});
+                t.stop();
+                tunnel = null;
+            }
+        }
+    }
+
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &bw.interface;
     try stdout.print("nullclaw gateway runtime started\n", .{});
     try stdout.print("  Gateway:  http://{s}:{d}\n", .{ state.gateway_host, state.gateway_port });
+    if (state.tunnel_url) |url| {
+        try stdout.print("  Tunnel:   {s} ({s})\n", .{ url, state.tunnel_provider });
+    }
     try stdout.print("  Components: {d} active\n", .{state.component_count});
     try stdout.flush();
     config.printModelConfig();
@@ -1053,6 +1095,11 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     if (sched_thread) |t| t.join();
     if (hb_thread) |t| t.join();
     gw_thread.join();
+
+    // Stop tunnel if running
+    if (tunnel) |*t| {
+        t.stop();
+    }
 
     try stdout.print("nullclaw gateway runtime stopped.\n", .{});
 }
