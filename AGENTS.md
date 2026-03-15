@@ -25,7 +25,7 @@ Key extension points:
 - `src/runtime.zig` (`RuntimeAdapter`) — execution environments
 - `src/peripherals.zig` (`Peripheral`) — hardware boards (Arduino, STM32, RPi)
 
-Current scale: **151 source files, ~96K lines of code, 3,371 tests**.
+Current scale: **245 source files, ~275K lines of code, 5,640+ tests**.
 
 Build and test:
 
