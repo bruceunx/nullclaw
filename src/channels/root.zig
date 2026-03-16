@@ -17,6 +17,8 @@
 
 const std = @import("std");
 const streaming = @import("../streaming.zig");
+pub const outbound = @import("../outbound.zig");
+pub const OutboundPayload = outbound.Payload;
 
 // ════════════════════════════════════════════════════════════════════════════
 // Shared Types
@@ -85,6 +87,9 @@ pub const Channel = struct {
             media: []const []const u8,
             stage: OutboundStage,
         ) anyerror!void = null,
+        /// Optional rich-message delivery (cards, buttons, sections).
+        /// If null, Channel.sendRich() falls back to Payload.toPlainText() + send().
+        sendRich: ?*const fn (ptr: *anyopaque, target: []const u8, payload: OutboundPayload) anyerror!void = null,
         /// Start processing indicator for a recipient (e.g., typing status).
         startTyping: *const fn (ptr: *anyopaque, recipient: []const u8) anyerror!void = &defaultStartTyping,
         /// Stop processing indicator for a recipient.
@@ -124,6 +129,17 @@ pub const Channel = struct {
 
     pub fn stopTyping(self: Channel, recipient: []const u8) !void {
         return self.vtable.stopTyping(self.ptr, recipient);
+    }
+
+    /// Send a rich card payload. If the channel implements sendRich, delegates to it.
+    /// Otherwise renders the payload to plain text and calls send().
+    pub fn sendRich(self: Channel, allocator: std.mem.Allocator, target: []const u8, payload: OutboundPayload) !void {
+        if (self.vtable.sendRich) |fn_rich| {
+            return fn_rich(self.ptr, target, payload);
+        }
+        const text = try payload.toPlainText(allocator);
+        defer allocator.free(text);
+        return self.send(target, text, &.{});
     }
 };
 
