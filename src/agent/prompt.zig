@@ -309,9 +309,14 @@ pub fn buildSystemPrompt(
         } else if (cc.sender_uuid) |uuid| {
             try std.fmt.format(w, "- Sender: ({s})\n", .{uuid});
         }
-        // Discord sender fields
+        // Sender identity fields
         if (cc.sender_id) |sid| {
-            try std.fmt.format(w, "- Sender Discord ID: {s}\n", .{sid});
+            const is_discord = if (cc.channel) |ch| std.ascii.eqlIgnoreCase(ch, "discord") else false;
+            if (is_discord) {
+                try std.fmt.format(w, "- Sender Discord ID: {s}\n", .{sid});
+            } else {
+                try std.fmt.format(w, "- Sender ID: {s}\n", .{sid});
+            }
         }
         if (cc.sender_username) |uname| {
             try std.fmt.format(w, "- Sender username: {s}\n", .{uname});
@@ -1126,6 +1131,23 @@ test "buildSystemPrompt includes discord sender identity fields" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "Sender Discord ID: u-42") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "Sender username: discord-user") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "Sender display name: Discord User") != null);
+}
+
+test "buildSystemPrompt uses generic sender id label outside discord" {
+    const allocator = std.testing.allocator;
+    const prompt = try buildSystemPrompt(allocator, .{
+        .workspace_dir = "/tmp/nonexistent",
+        .model_name = "test-model",
+        .tools = &.{},
+        .conversation_context = .{
+            .channel = "nostr",
+            .sender_id = "npub-42",
+        },
+    });
+    defer allocator.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Sender ID: npub-42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Sender Discord ID: npub-42") == null);
 }
 
 test "buildSystemPrompt injects memory.md when MEMORY.md is absent" {

@@ -27,6 +27,7 @@ const subagent_runner = @import("subagent_runner.zig");
 const observability = @import("observability.zig");
 const agent_routing = @import("agent_routing.zig");
 const security = @import("security/policy.zig");
+const root_mod = @import("root.zig");
 const PairingGuard = @import("security/pairing.zig").PairingGuard;
 const constantTimeEq = @import("security/pairing.zig").constantTimeEq;
 const channels = @import("channels/root.zig");
@@ -63,12 +64,16 @@ const GatewayObservedToolEvent = struct {
 };
 
 const WebhookRouting = struct {
+    sender_id: []const u8,
+    chat_id: []const u8,
     session_key: []const u8,
     owned_session_key: ?[]const u8 = null,
+    metadata_json: ?[]const u8 = null,
     conversation_context: ?ConversationContext = null,
 
     fn deinit(self: *WebhookRouting, allocator: std.mem.Allocator) void {
         if (self.owned_session_key) |owned| allocator.free(owned);
+        if (self.metadata_json) |owned| allocator.free(owned);
     }
 };
 
@@ -86,6 +91,65 @@ fn simpleConversationContext(
         .is_group = is_group,
         .group_id = if (is_group) (group_id orelse peer_id) else null,
     });
+}
+
+fn appendWebhookMetadataField(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    wrote_field: *bool,
+    key: []const u8,
+    value: []const u8,
+) !void {
+    if (value.len == 0) return;
+    if (wrote_field.*) try out.appendSlice(allocator, ",");
+    wrote_field.* = true;
+    try out.appendSlice(allocator, "\"");
+    try out.appendSlice(allocator, key);
+    try out.appendSlice(allocator, "\":");
+    try root_mod.json_util.appendJsonString(out, allocator, value);
+}
+
+fn buildWebhookRoutingMetadataJson(
+    allocator: std.mem.Allocator,
+    account_id: ?[]const u8,
+    peer_kind: ?agent_routing.ChatType,
+    peer_id: ?[]const u8,
+    sender_username: ?[]const u8,
+    sender_display_name: ?[]const u8,
+) ?[]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    out.append(allocator, '{') catch return null;
+    var wrote_field = false;
+
+    if (account_id) |value| {
+        appendWebhookMetadataField(&out, allocator, &wrote_field, "account_id", value) catch return null;
+    }
+    if (peer_kind) |kind| {
+        const kind_str = switch (kind) {
+            .direct => "direct",
+            .group => "group",
+            .channel => "channel",
+        };
+        appendWebhookMetadataField(&out, allocator, &wrote_field, "peer_kind", kind_str) catch return null;
+    }
+    if (peer_id) |value| {
+        appendWebhookMetadataField(&out, allocator, &wrote_field, "peer_id", value) catch return null;
+    }
+    if (sender_username) |value| {
+        appendWebhookMetadataField(&out, allocator, &wrote_field, "sender_username", value) catch return null;
+    }
+    if (sender_display_name) |value| {
+        appendWebhookMetadataField(&out, allocator, &wrote_field, "sender_display_name", value) catch return null;
+    }
+
+    out.append(allocator, '}') catch return null;
+    if (!wrote_field) {
+        out.deinit(allocator);
+        return null;
+    }
+    return out.toOwnedSlice(allocator) catch null;
 }
 
 const GatewayTurnToolEvent = struct {
@@ -1553,6 +1617,16 @@ fn webhookRouting(
     const sender_username = jsonStringField(body, "sender_username");
     const sender_display_name = jsonStringField(body, "sender_display_name");
     const account_id = jsonStringField(body, "account_id");
+    const bus_sender_id = sender_id orelse "anon";
+    const bus_chat_id = peer_id orelse fallback_key;
+    const metadata_json = buildWebhookRoutingMetadataJson(
+        allocator,
+        account_id,
+        peer_kind,
+        peer_id,
+        sender_username,
+        sender_display_name,
+    );
 
     const conversation_context = if (channel != null or peer_id != null or sender_id != null or account_id != null or sender_username != null or sender_display_name != null)
         buildConversationContext(.{
@@ -1577,15 +1651,21 @@ fn webhookRouting(
                         .account_id = account_id orelse "default",
                         .peer = .{ .kind = kind, .id = resolved_peer_id },
                     }, cfg.agent_bindings, cfg.agents, cfg.session) catch return .{
+                        .sender_id = bus_sender_id,
+                        .chat_id = bus_chat_id,
                         .session_key = fallback_key,
                         .owned_session_key = owned_fallback_key,
+                        .metadata_json = metadata_json,
                         .conversation_context = conversation_context,
                     };
                     if (owned_fallback_key) |owned| allocator.free(owned);
                     allocator.free(route.main_session_key);
                     return .{
+                        .sender_id = bus_sender_id,
+                        .chat_id = bus_chat_id,
                         .session_key = route.session_key,
                         .owned_session_key = route.session_key,
+                        .metadata_json = metadata_json,
                         .conversation_context = conversation_context,
                     };
                 }
@@ -1594,8 +1674,11 @@ fn webhookRouting(
     }
 
     return .{
+        .sender_id = bus_sender_id,
+        .chat_id = bus_chat_id,
         .session_key = fallback_key,
         .owned_session_key = owned_fallback_key,
+        .metadata_json = metadata_json,
         .conversation_context = conversation_context,
     };
 }
@@ -4066,7 +4149,16 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                             defer routing.deinit(req_allocator);
 
                             if (state.event_bus) |eb| {
-                                _ = publishToBus(eb, state.allocator, "webhook", bearer orelse "anon", routing.session_key, msg_text, routing.session_key, null);
+                                _ = publishToBus(
+                                    eb,
+                                    state.allocator,
+                                    "webhook",
+                                    routing.sender_id,
+                                    routing.chat_id,
+                                    msg_text,
+                                    routing.session_key,
+                                    routing.metadata_json,
+                                );
                                 response_body = "{\"status\":\"received\"}";
                             } else if (session_mgr_opt) |*sm| {
                                 const start_seq = gateway_thread_observer.currentSeq();
@@ -5689,7 +5781,13 @@ test "webhookRouting uses route engine when standardized peer metadata is presen
     );
     defer routing.deinit(allocator);
 
+    try std.testing.expectEqualStrings("user-1", routing.sender_id);
+    try std.testing.expectEqualStrings("session-1", routing.chat_id);
     try std.testing.expectEqualStrings("agent:web-direct-agent:web:direct:session-1", routing.session_key);
+    try std.testing.expect(routing.metadata_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, routing.metadata_json.?, "\"account_id\":\"web-main\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, routing.metadata_json.?, "\"peer_kind\":\"direct\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, routing.metadata_json.?, "\"peer_id\":\"session-1\"") != null);
     try std.testing.expect(routing.conversation_context != null);
     try std.testing.expectEqualStrings("web", routing.conversation_context.?.channel.?);
     try std.testing.expectEqualStrings("session-1", routing.conversation_context.?.peer_id.?);

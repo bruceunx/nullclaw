@@ -587,13 +587,12 @@ fn buildInboundConversationContext(
     else
         null;
 
-    const has_sender_identity = meta.sender_username != null or meta.sender_display_name != null;
     const has_scope = inferred_is_group != null or group_id != null or meta.peer_id != null or meta.guild_id != null or meta.channel_id != null;
 
     return buildConversationContext(.{
         .channel = if (msg.channel.len > 0) msg.channel else null,
         .account_id = meta.account_id,
-        .sender_id = if (has_sender_identity or has_scope) msg.sender_id else null,
+        .sender_id = if (msg.sender_id.len > 0) msg.sender_id else null,
         .sender_username = meta.sender_username,
         .sender_display_name = meta.sender_display_name,
         .peer_id = meta.peer_id orelse if (has_scope) msg.chat_id else null,
@@ -2068,7 +2067,7 @@ test "buildInboundConversationContext preserves discord identity metadata" {
     try std.testing.expect(context.is_group.?);
 }
 
-test "buildInboundConversationContext keeps channel when metadata is absent" {
+test "buildInboundConversationContext keeps channel and sender when metadata is absent" {
     const msg = bus_mod.InboundMessage{
         .channel = "external",
         .sender_id = "user-1",
@@ -2079,7 +2078,7 @@ test "buildInboundConversationContext keeps channel when metadata is absent" {
     const context = buildInboundConversationContext(&msg, .{}) orelse return error.TestUnexpectedResult;
 
     try std.testing.expectEqualStrings("external", context.channel.?);
-    try std.testing.expect(context.sender_id == null);
+    try std.testing.expectEqualStrings("user-1", context.sender_id.?);
     try std.testing.expect(context.group_id == null);
     try std.testing.expect(context.is_group == null);
 }
