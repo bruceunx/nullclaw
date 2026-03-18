@@ -2601,6 +2601,62 @@ fn applyHotReloadConfig(self: anytype, cfg: *const config_module.Config) !HotRel
         }
     }
 
+    // Profile-aware reload: if this agent has a profile_name, find it in the new config and update
+    if (@hasField(@TypeOf(self.*), "profile_name")) {
+        if (self.profile_name) |pname| {
+            for (cfg.agents) |*acfg| {
+                if (std.mem.eql(u8, acfg.name, pname)) {
+                    // Update model if changed
+                    if (!std.mem.eql(u8, self.model_name, acfg.model)) {
+                        summary.attempted += 1;
+                        setModelName(self, acfg.model) catch |err| {
+                            log.warn("Hot reload profile model update failed: {}", .{err});
+                        };
+                        summary.applied += 1;
+                    }
+
+                    // Update provider if changed
+                    {
+                        const new_prov = acfg.provider;
+                        const old_prov = self.default_provider;
+                        if (!std.mem.eql(u8, old_prov, new_prov)) {
+                            summary.attempted += 1;
+                            setDefaultProvider(self, new_prov) catch |err| {
+                                log.warn("Hot reload profile provider update failed: {}", .{err});
+                            };
+                            summary.applied += 1;
+                        }
+                    }
+
+                    // Update system prompt if changed
+                    if (acfg.system_prompt) |new_prompt| {
+                        if (@hasField(@TypeOf(self.*), "profile_system_prompt")) {
+                            const old_prompt = self.profile_system_prompt orelse "";
+                            if (!std.mem.eql(u8, old_prompt, new_prompt)) {
+                                summary.attempted += 1;
+                                if (self.profile_system_prompt) |p| self.allocator.free(p);
+                                self.profile_system_prompt = self.allocator.dupe(u8, new_prompt) catch null;
+                                if (self.profile_system_prompt != null) {
+                                    summary.applied += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    // Update temperature if changed
+                    if (acfg.temperature) |new_temp| {
+                        if (self.temperature != new_temp) {
+                            summary.attempted += 1;
+                            self.temperature = new_temp;
+                            summary.applied += 1;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     if (summary.applied > 0) {
         invalidateSystemPromptCache(self);
     }

@@ -17,6 +17,7 @@ const primary_telegram_commands = [_]TelegramCommand{
     .{ .command = "new", .description = "Clear history, start fresh" },
     .{ .command = "status", .description = "Show model and stats" },
     .{ .command = "whoami", .description = "Show current session id" },
+    .{ .command = "config", .description = "Manage runtime configuration" },
     .{ .command = "model", .description = "Switch model" },
     .{ .command = "think", .description = "Set thinking level" },
     .{ .command = "verbose", .description = "Set verbose level" },
