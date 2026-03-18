@@ -153,6 +153,8 @@ host 会先发：
       "streaming": false,
       "send_rich": false,
       "typing": false,
+      "edit": false,
+      "delete": false,
       "reactions": false,
       "read_receipts": false
     }
@@ -176,6 +178,10 @@ Capability 含义：
   插件实现了 `send_rich`。
 - `typing`
   插件实现了 `start_typing` 和 `stop_typing`。
+- `edit`
+  插件实现了 `edit_message`，允许 host 后续原地更新同一条消息。
+- `delete`
+  插件实现了 `delete_message`，允许 host 后续删除同一条消息。
 - `reactions`
   插件实现了 `set_reaction`。
 - `read_receipts`
@@ -287,6 +293,20 @@ Host 请求：
 {"jsonrpc":"2.0","id":5,"result":{"accepted":true}}
 ```
 
+如果插件同时声明了 `capabilities.edit=true` 和
+`capabilities.delete=true`，那么 `send` 还可以返回稳定的消息引用，
+这样 host 后面就能继续更新或删除同一条消息：
+
+```json
+{"jsonrpc":"2.0","id":5,"result":{"accepted":true,"message_id":"msg-42"}}
+```
+
+或者：
+
+```json
+{"jsonrpc":"2.0","id":5,"result":{"accepted":true,"message":{"target":"room-1","message_id":"msg-42"}}}
+```
+
 规则：
 
 - `message.target` 的语义由插件自己定义
@@ -294,6 +314,9 @@ Host 请求：
 - `message.stage` 只能是 `"final"` 或 `"chunk"`
 - `message.media` 是字符串数组
 - 如果插件实际上没有接受这个动作，就不能伪造成功
+- 如果要让 host 后续执行 edit/delete，`message_id` 必须是非空且稳定的渠道消息标识
+- `result.message.target` 可以省略；省略时 host 会沿用原始出站目标
+- 没声明 `edit` + `delete` 的插件，只返回 `{"accepted": true}` 就可以
 
 host 现在严格区分：
 
@@ -356,9 +379,9 @@ Host 请求：
 
 如果不支持 `send_rich`，就不要声明 capability。只有在 payload 足够简单时，host 才可能退化为普通 `send`。
 
-### `set_reaction`
+### `edit_message`
 
-只有在 `capabilities.reactions=true` 时才会调用。
+只有在 `capabilities.edit=true` 时才会调用。
 
 Host 请求：
 
@@ -366,7 +389,7 @@ Host 请求：
 {
   "jsonrpc": "2.0",
   "id": 7,
-  "method": "set_reaction",
+  "method": "edit_message",
   "params": {
     "runtime": {
       "name": "plugin_chat",
@@ -375,7 +398,9 @@ Host 请求：
     "message": {
       "target": "room-1",
       "message_id": "msg-42",
-      "emoji": "✅"
+      "text": "patched",
+      "attachments": [],
+      "choices": []
     }
   }
 }
@@ -387,14 +412,12 @@ Host 请求：
 {"jsonrpc":"2.0","id":7,"result":{"accepted":true}}
 ```
 
-规则：
+当某个渠道本身不支持原生 `.chunk` 流式发送时，host 可能会先 `send`
+一条草稿消息，再用这个 RPC 持续更新它。
 
-- `emoji` 为字符串时表示设置或更新 reaction
-- `emoji: null` 表示清除这个消息上的 reaction
+### `delete_message`
 
-### `mark_read`
-
-只有在 `capabilities.read_receipts=true` 时才会调用。
+只有在 `capabilities.delete=true` 时才会调用。
 
 Host 请求：
 
@@ -402,7 +425,7 @@ Host 请求：
 {
   "jsonrpc": "2.0",
   "id": 8,
-  "method": "mark_read",
+  "method": "delete_message",
   "params": {
     "runtime": {
       "name": "plugin_chat",
@@ -422,6 +445,72 @@ Host 请求：
 {"jsonrpc":"2.0","id":8,"result":{"accepted":true}}
 ```
 
+### `set_reaction`
+
+只有在 `capabilities.reactions=true` 时才会调用。
+
+Host 请求：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "set_reaction",
+  "params": {
+    "runtime": {
+      "name": "plugin_chat",
+      "account_id": "main"
+    },
+    "message": {
+      "target": "room-1",
+      "message_id": "msg-42",
+      "emoji": "✅"
+    }
+  }
+}
+```
+
+必须返回：
+
+```json
+{"jsonrpc":"2.0","id":9,"result":{"accepted":true}}
+```
+
+规则：
+
+- `emoji` 为字符串时表示设置或更新 reaction
+- `emoji: null` 表示清除这个消息上的 reaction
+
+### `mark_read`
+
+只有在 `capabilities.read_receipts=true` 时才会调用。
+
+Host 请求：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "mark_read",
+  "params": {
+    "runtime": {
+      "name": "plugin_chat",
+      "account_id": "main"
+    },
+    "message": {
+      "target": "room-1",
+      "message_id": "msg-42"
+    }
+  }
+}
+```
+
+必须返回：
+
+```json
+{"jsonrpc":"2.0","id":10,"result":{"accepted":true}}
+```
+
 ### Typing RPC
 
 只有在 `capabilities.typing=true` 时才会调用。
@@ -429,17 +518,17 @@ Host 请求：
 请求：
 
 ```json
-{"jsonrpc":"2.0","id":9,"method":"start_typing","params":{"runtime":{"name":"plugin_chat","account_id":"main"},"recipient":"room-1"}}
+{"jsonrpc":"2.0","id":11,"method":"start_typing","params":{"runtime":{"name":"plugin_chat","account_id":"main"},"recipient":"room-1"}}
 ```
 
 ```json
-{"jsonrpc":"2.0","id":10,"method":"stop_typing","params":{"runtime":{"name":"plugin_chat","account_id":"main"},"recipient":"room-1"}}
+{"jsonrpc":"2.0","id":12,"method":"stop_typing","params":{"runtime":{"name":"plugin_chat","account_id":"main"},"recipient":"room-1"}}
 ```
 
 必须返回：
 
 ```json
-{"jsonrpc":"2.0","id":11,"result":{"accepted":true}}
+{"jsonrpc":"2.0","id":13,"result":{"accepted":true}}
 ```
 
 ## 入站通知

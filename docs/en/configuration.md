@@ -345,14 +345,16 @@ contract, see [External Channel Plugins](./external-channels.md).
 - `transport.env` is forwarded only to the plugin process.
 - `config` must be a JSON object; it is forwarded to the plugin `start` request as `params.config`.
 - Plugins must answer `get_manifest`, handle `start`/`send`/`stop`; `health` is recommended so supervision can detect disconnected sidecars instead of only live processes.
-- `get_manifest.result` must contain `protocol_version: 2`; `capabilities.health`, `capabilities.streaming`, `capabilities.send_rich`, `capabilities.typing`, `capabilities.reactions`, and `capabilities.read_receipts` are optional capability bits.
+- `get_manifest.result` must contain `protocol_version: 2`; `capabilities.health`, `capabilities.streaming`, `capabilities.send_rich`, `capabilities.typing`, `capabilities.edit`, `capabilities.delete`, `capabilities.reactions`, and `capabilities.read_receipts` are optional capability bits.
 - `health.result` must report an explicit boolean (`healthy`) or explicit health signals (`ok`, `connected`, `logged_in`); an empty object is treated as invalid.
 - `start.params` now has a nested `runtime` object with `name`, `account_id`, and host-owned `state_dir`.
-- `start.result` must contain `started: true`; `send`, `send_rich`, and typing RPCs must return `result.accepted: true` when the plugin actually accepts the action. A JSON-RPC success envelope by itself is not enough.
+- `start.result` must contain `started: true`; `send`, `send_rich`, `edit_message`, `delete_message`, and typing/message-action RPCs must return `result.accepted: true` when the plugin actually accepts the action. A JSON-RPC success envelope by itself is not enough.
 - `send.params` now has nested `runtime` and `message` objects; text payloads use `message.text`.
+- If a plugin declares both `capabilities.edit=true` and `capabilities.delete=true`, `send.result` may also include `message_id` or `message { target?, message_id }`; that lets nullclaw keep a tracked draft updated on channels that do not support native `.chunk` streaming.
 - If `capabilities.streaming=true`, nullclaw may emit `.chunk` staged `send` events during model streaming. If it is absent or `false`, nullclaw will only emit final responses.
 - If `capabilities.send_rich=true`, the host may call `send_rich` with nested `runtime` and `message { target, text, attachments, choices }`.
 - If `capabilities.typing=true`, the host may call `start_typing` / `stop_typing` with nested `runtime` plus `recipient`.
+- If `capabilities.edit=true` / `capabilities.delete=true`, the host may call `edit_message` / `delete_message`.
 - If `capabilities.reactions=true` or `capabilities.read_receipts=true`, the host may call `set_reaction` and `mark_read`.
 - `inbound_message.params.message` must include `sender_id`, `chat_id`, and `text`; if `metadata` is present it must be a JSON object, and if `media` is present it must be an array of non-empty strings.
 - Include `metadata.peer_kind` plus `metadata.peer_id` when you want routing/bindings to distinguish direct vs group peers for unknown channels.

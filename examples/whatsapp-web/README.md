@@ -7,7 +7,8 @@ This directory contains a reference adapter for `channels.external`:
   HTTP bridge contract from the whatsmeow example (`/health`, `/poll`, `/send`).
   The adapter advertises `protocol_version=2`, `capabilities.health=true`,
   `capabilities.streaming=false`,
-  `capabilities.send_rich=false`, and `capabilities.typing=false`
+  `capabilities.send_rich=false`, `capabilities.typing=false`,
+  `capabilities.edit=false`, and `capabilities.delete=false`
   in `get_manifest`.
   `config.bridge_url` must be `https://...` or loopback `http://127.0.0.1/...`.
 

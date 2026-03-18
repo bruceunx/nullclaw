@@ -892,7 +892,7 @@ fn inboundDispatcherThread(
             markInboundMessageRead(channel, buildInboundMessageRef(&msg, parsed_meta.fields));
         }
         const use_streaming_outbound = if (outbound_channel) |channel|
-            channel.supportsStreamingOutbound()
+            channel.supportsStreamingOutbound() or dispatch.supportsDraftStreaming(channel)
         else
             false;
         var streaming_ctx = StreamingOutboundCtx{
