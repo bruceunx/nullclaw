@@ -48,9 +48,7 @@ RUN cat > /nullclaw-data/config.json << 'EOF'
   },
   "models": {
     "providers": {
-      "openrouter": {
-        "api_key": ""
-      }
+      "openrouter": {}
     }
   },
   "gateway": {
