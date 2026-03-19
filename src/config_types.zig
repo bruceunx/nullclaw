@@ -1502,13 +1502,33 @@ pub const McpServerConfig = struct {
         return std.mem.eql(u8, trimmed, HTTP_TRANSPORT);
     }
 
+    /// Returns true if host is localhost or a private/RFC1918 address.
+    fn isLocalHost(host: []const u8) bool {
+        if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
+        if (std.mem.startsWith(u8, host, "127.")) return true;
+        if (std.mem.eql(u8, host, "::1")) return true;
+        if (std.mem.startsWith(u8, host, "10.")) return true;
+        if (std.mem.startsWith(u8, host, "192.168.")) return true;
+        if (std.mem.startsWith(u8, host, "172.")) {
+            const rest = host[4..];
+            if (rest.len >= 2) {
+                const octet = std.fmt.parseInt(u8, rest[0 .. std.mem.indexOfScalar(u8, rest, '.') orelse rest.len], 10) catch return false;
+                if (octet >= 16 and octet <= 31) return true;
+            }
+        }
+        if (std.mem.eql(u8, host, "[::1]")) return true;
+        return false;
+    }
+
     pub fn isValidHttpUrl(raw: []const u8) bool {
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
         if (trimmed.len == 0) return false;
         if (std.mem.indexOfAny(u8, trimmed, " \t\r\n") != null) return false;
 
         const uri = std.Uri.parse(trimmed) catch return false;
-        if (!std.ascii.eqlIgnoreCase(uri.scheme, "https")) return false;
+        const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+        const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
+        if (!is_https and !is_http) return false;
 
         const host_comp = uri.host orelse return false;
         const host = switch (host_comp) {
@@ -1521,6 +1541,9 @@ pub const McpServerConfig = struct {
         if (host.len == 0) return false;
         if (std.mem.indexOfAny(u8, host, " \t\r\n") != null) return false;
         if (host[0] == ':') return false;
+
+        // http:// only allowed for localhost / private IPs
+        if (is_http and !isLocalHost(host)) return false;
 
         if (host[0] == '[') {
             const close = std.mem.indexOfScalar(u8, host, ']') orelse return false;
@@ -1649,6 +1672,13 @@ test "McpServerConfig http url validation" {
     try std.testing.expect(McpServerConfig.isValidHttpUrl("https://mcp.example.com/mcp"));
     try std.testing.expect(!McpServerConfig.isValidHttpUrl("http://mcp.example.com/mcp"));
     try std.testing.expect(!McpServerConfig.isValidHttpUrl("https://mcp.example.com/mcp#frag"));
+    // http:// allowed for localhost and private IPs
+    try std.testing.expect(McpServerConfig.isValidHttpUrl("http://localhost:6000/mcp"));
+    try std.testing.expect(McpServerConfig.isValidHttpUrl("http://127.0.0.1:6000/mcp"));
+    try std.testing.expect(McpServerConfig.isValidHttpUrl("http://10.0.0.1:8080/rpc"));
+    try std.testing.expect(McpServerConfig.isValidHttpUrl("http://192.168.1.1:8080/rpc"));
+    try std.testing.expect(McpServerConfig.isValidHttpUrl("http://172.16.0.1:8080/rpc"));
+    try std.testing.expect(!McpServerConfig.isValidHttpUrl("http://example.com:6000/mcp"));
 }
 
 test "McpServerConfig timeout defaults" {
