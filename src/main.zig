@@ -1951,14 +1951,14 @@ fn runWorkspace(allocator: std.mem.Allocator, sub_args: []const []const u8) !voi
 fn runWorkspaceEdit(allocator: std.mem.Allocator, args: []const []const u8, cfg: yc.config.Config) void {
     if (args.len < 1) {
         std.debug.print("Usage: nullclaw workspace edit <filename>\n\n", .{});
-        std.debug.print("Bootstrap files: SOUL.md, AGENTS.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md\n", .{});
+        std.debug.print("Bootstrap files: SOUL.md, AGENTS.md, TOOLS.md, CONFIG.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md\n", .{});
         std.process.exit(1);
     }
     const filename = args[0];
 
     if (!yc.bootstrap.isBootstrapFilename(filename)) {
         std.debug.print("Not a bootstrap file: {s}\n", .{filename});
-        std.debug.print("Bootstrap files: SOUL.md, AGENTS.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md\n", .{});
+        std.debug.print("Bootstrap files: SOUL.md, AGENTS.md, TOOLS.md, CONFIG.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md\n", .{});
         std.process.exit(1);
     }
 
