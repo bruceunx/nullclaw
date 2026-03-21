@@ -228,13 +228,15 @@ fn resolveProfileProvider(
         break :blk owned_api_key;
     };
 
-    var holder = providers.ProviderHolder.fromConfig(
+    var holder = providers.ProviderHolder.fromConfigWithApiMode(
         allocator,
         profile.provider,
         provider_api_key,
         cfg.getProviderBaseUrl(profile.provider),
         cfg.getProviderNativeTools(profile.provider),
         cfg.getProviderUserAgent(profile.provider),
+        cfg.getProviderApiMode(profile.provider),
+        cfg.getProviderMaxStreamingPromptBytes(profile.provider),
     );
     return .{
         .provider = holder.provider(),
@@ -436,6 +438,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .subagent_manager = &subagent_manager,
         .bootstrap_provider = bootstrap_provider,
         .backend_name = cfg.memory.backend,
+        .sandbox_backend = cfg.security.sandbox.backend,
+        .sandbox_enabled = cfg.security.sandbox.enabled orelse true,
     });
     defer tools_mod.deinitTools(allocator, tools);
 
