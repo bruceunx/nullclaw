@@ -102,6 +102,12 @@ pub fn isVisionUnsupportedText(text: []const u8) bool {
         return true;
     }
 
+    // infini-ai: "image_url' is not supported for model 'glm-5'"
+    // and similar "X is not supported" phrasing where X is image-related
+    if (containsAsciiFold(text, "image") and containsAsciiFold(text, "not supported")) {
+        return true;
+    }
+
     return false;
 }
 
@@ -163,6 +169,12 @@ fn extractErrorFields(root_obj: anytype) ?struct {
 
     if (message == null) {
         if (root_obj.get("message")) |v| {
+            if (v == .string) message = v.string;
+        }
+    }
+    // infini-ai and some other providers use "msg" instead of "message"
+    if (message == null) {
+        if (root_obj.get("msg")) |v| {
             if (v == .string) message = v.string;
         }
     }
@@ -377,6 +389,12 @@ fn classifyTopLevelError(root_obj: anytype) ?ApiErrorKind {
             message = v.string;
         }
     }
+    // infini-ai and some other providers use "msg" instead of "message"
+    if (message == null) {
+        if (root_obj.get("msg")) |v| {
+            if (v == .string) message = v.string;
+        }
+    }
 
     if (!has_error_signal) return null;
     return classifyFromFields(status, code, type_name, message);
@@ -442,4 +460,43 @@ test "summarizeKnownApiError returns null for non-error payload" {
 
     var buf: [128]u8 = undefined;
     try std.testing.expect(summarizeKnownApiError(parsed.value.object, &buf) == null);
+}
+
+// infini-ai: uses top-level "code" (integer) and "msg" (string) instead of
+// the standard "error": { "message": ... } envelope.
+// Actual payload: {"code":10007,"msg":"Bad Request: [message type 'image_url' is not supported for model 'glm-5']"}
+test "classifyKnownApiError detects infini-ai vision-unsupported via top-level msg field" {
+    const body =
+        \\{"code":10007,"msg":"Bad Request: [message type 'image_url' is not supported for model 'glm-5']"}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+
+    const kind = classifyKnownApiError(parsed.value.object);
+    try std.testing.expectEqual(ApiErrorKind.vision_unsupported, kind.?);
+    try std.testing.expect(kindToError(.vision_unsupported) == error.ProviderDoesNotSupportVision);
+}
+
+test "isVisionUnsupportedText matches infini-ai phrasing" {
+    const text = "Bad Request: [message type 'image_url' is not supported for model 'glm-5']";
+    try std.testing.expect(isVisionUnsupportedText(text));
+}
+
+test "isVisionUnsupportedText does not false-positive on unrelated image mention" {
+    // "image" alone without "not supported" should not trigger
+    const text = "Please provide an image description";
+    try std.testing.expect(!isVisionUnsupportedText(text));
+}
+
+test "summarizeKnownApiError captures infini-ai msg field" {
+    const body =
+        \\{"code":10007,"msg":"Bad Request: [message type 'image_url' is not supported for model 'glm-5']"}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+
+    var buf: [512]u8 = undefined;
+    const summary = summarizeKnownApiError(parsed.value.object, &buf).?;
+    try std.testing.expect(std.mem.indexOf(u8, summary, "message=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "image_url") != null);
 }
