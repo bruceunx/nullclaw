@@ -173,8 +173,10 @@ fn hasVersionedApiSegment(url: []const u8) bool {
 
 fn isValidCustomProviderUrl(url: []const u8) bool {
     if (url.len == 0) return false;
-    if (!(std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://"))) return false;
-    return hasVersionedApiSegment(url);
+    // We allow any http/https URL. While OpenAI-compatible endpoints usually
+    // contain /v1, some gateways (like Bifrost or custom proxies) might not
+    // expose it in the base URL or use a different structure.
+    return std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://");
 }
 
 fn isLocalEndpoint(url: []const u8) bool {
@@ -3732,9 +3734,13 @@ test "resolveProviderForQuickSetup supports custom: versioned endpoint beyond v1
     try std.testing.expectEqualStrings("custom:https://example.com/openai/v2", custom.key);
 }
 
+test "resolveProviderForQuickSetup supports non-versioned custom: prefix" {
+    const custom = resolveProviderForQuickSetup("custom:https://example.com/api") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("custom:https://example.com/api", custom.key);
+}
+
 test "resolveProviderForQuickSetup rejects invalid custom endpoint format" {
     try std.testing.expect(resolveProviderForQuickSetup("custom:") == null);
-    try std.testing.expect(resolveProviderForQuickSetup("custom:https://example.com/api") == null);
     try std.testing.expect(resolveProviderForQuickSetup("custom:example.com/v1") == null);
 }
 
