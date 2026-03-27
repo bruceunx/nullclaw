@@ -249,6 +249,8 @@ pub fn drainDurableOutboundOutboxOnce(
     delivery_outbox: *channel_outbox.DeliveryOutbox,
     registry: *const ChannelRegistry,
 ) !bool {
+    if (try delivery_outbox.purgePersistedDelivered() > 0) return true;
+
     const now_ns: i64 = @intCast(std.time.nanoTimestamp());
     var claimed = (try delivery_outbox.claimNextReady(allocator, now_ns)) orelse return false;
     defer claimed.deinit(allocator);
@@ -263,7 +265,8 @@ pub fn drainDurableOutboundOutboxOnce(
             try delivery_outbox.recordFailure(claimed.id, @errorName(err), now_ns);
             return true;
         };
-        try delivery_outbox.markDelivered(claimed.id);
+        try delivery_outbox.recordDelivered(claimed.id, now_ns);
+        try delivery_outbox.purgeDelivered(claimed.id);
         return true;
     }
 
@@ -1354,6 +1357,40 @@ test "durable outbound worker retries persisted final delivery" {
     try std.testing.expectEqual(@as(usize, 0), outbox.pendingCount());
     try std.testing.expectEqual(@as(u64, 2), mock_tg.final_attempts.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), mock_tg.sent_count.load(.monotonic));
+}
+
+// Regression: if the process crashes after send success but before durable cleanup,
+// the restarted worker must purge the acknowledged job instead of redelivering it.
+test "durable outbound worker purges acknowledged persisted delivery without resend" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+    const outbox_path = try std.fs.path.join(allocator, &.{ tmp_root, "delivery.json" });
+    defer allocator.free(outbox_path);
+
+    var outbox = try channel_outbox.DeliveryOutbox.init(allocator, outbox_path);
+    defer outbox.deinit();
+
+    var msg = try bus.makeOutbound(allocator, "telegram", "chat1", "hello");
+    defer msg.deinit(allocator);
+    const id = try outbox.enqueueFinal(msg);
+
+    var claimed = (try outbox.claimNextReady(allocator, 0)).?;
+    claimed.deinit(allocator);
+    try outbox.recordDelivered(id, 42);
+
+    var mock_tg = MockChannel{ .name_str = "telegram" };
+    var reg = ChannelRegistry.init(allocator);
+    defer reg.deinit();
+    try reg.register(mock_tg.channel());
+
+    try std.testing.expect(try drainDurableOutboundOutboxOnce(allocator, &outbox, &reg));
+    try std.testing.expectEqual(@as(usize, 0), outbox.pendingCount());
+    try std.testing.expectEqual(@as(u64, 0), mock_tg.final_attempts.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), mock_tg.sent_count.load(.monotonic));
 }
 
 test "dispatcher handles multiple messages" {

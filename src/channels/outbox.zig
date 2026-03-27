@@ -54,6 +54,7 @@ pub const DeliveryOutbox = struct {
         next_attempt_ns: i64 = 0,
         last_error: ?[]u8 = null,
         in_flight: bool = false,
+        delivered_at_ns: i64 = 0,
 
         fn deinit(self: *Job, allocator: Allocator) void {
             allocator.free(self.channel);
@@ -177,7 +178,7 @@ pub const DeliveryOutbox = struct {
 
         var count: usize = 0;
         for (self.jobs.items) |job| {
-            if (job.attempts < MAX_DELIVERY_ATTEMPTS) count += 1;
+            if (job.delivered_at_ns == 0 and job.attempts < MAX_DELIVERY_ATTEMPTS) count += 1;
         }
         return count;
     }
@@ -188,6 +189,7 @@ pub const DeliveryOutbox = struct {
 
         for (self.jobs.items) |*job| {
             if (job.in_flight) continue;
+            if (job.delivered_at_ns != 0) continue;
             if (job.attempts >= MAX_DELIVERY_ATTEMPTS) continue;
             if (job.next_attempt_ns > now_ns) continue;
 
@@ -198,7 +200,22 @@ pub const DeliveryOutbox = struct {
         return null;
     }
 
-    pub fn markDelivered(self: *Self, id: u64) !void {
+    pub fn recordDelivered(self: *Self, id: u64, now_ns: i64) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const index = self.findJobIndexLocked(id) orelse return error.JobNotFound;
+        var job = &self.jobs.items[index];
+        job.in_flight = false;
+        job.delivered_at_ns = now_ns;
+        if (job.last_error) |last_error| {
+            self.allocator.free(last_error);
+            job.last_error = null;
+        }
+        try self.saveLocked();
+    }
+
+    pub fn purgeDelivered(self: *Self, id: u64) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -206,6 +223,23 @@ pub const DeliveryOutbox = struct {
         var removed = self.jobs.swapRemove(index);
         removed.deinit(self.allocator);
         try self.saveLocked();
+    }
+
+    pub fn purgePersistedDelivered(self: *Self) !usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var removed_count: usize = 0;
+        var idx: usize = self.jobs.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            if (self.jobs.items[idx].delivered_at_ns == 0) continue;
+            var removed = self.jobs.swapRemove(idx);
+            removed.deinit(self.allocator);
+            removed_count += 1;
+        }
+        if (removed_count > 0) try self.saveLocked();
+        return removed_count;
     }
 
     pub fn recordFailure(self: *Self, id: u64, err_name: []const u8, now_ns: i64) !void {
@@ -323,6 +357,8 @@ pub const DeliveryOutbox = struct {
             try json_util.appendJsonInt(&buf, self.allocator, "next_attempt_ns", job.next_attempt_ns);
             try buf.appendSlice(self.allocator, ",");
             try appendOptionalJsonString(&buf, self.allocator, "last_error", job.last_error);
+            try buf.appendSlice(self.allocator, ",");
+            try json_util.appendJsonInt(&buf, self.allocator, "delivered_at_ns", job.delivered_at_ns);
             try buf.appendSlice(self.allocator, "\n    }");
         }
 
@@ -386,6 +422,7 @@ pub const DeliveryOutbox = struct {
                 .attempts = if (object.get("attempts")) |value| if (value == .integer and value.integer >= 0) @intCast(value.integer) else 0 else 0,
                 .next_attempt_ns = if (object.get("next_attempt_ns")) |value| if (value == .integer) value.integer else 0 else 0,
                 .last_error = if (jsonString(object.get("last_error"))) |last_error| try self.allocator.dupe(u8, last_error) else null,
+                .delivered_at_ns = if (object.get("delivered_at_ns")) |value| if (value == .integer and value.integer >= 0) value.integer else 0 else 0,
             };
             errdefer job.deinit(self.allocator);
 
@@ -577,4 +614,37 @@ test "delivery outbox failure keeps job durable for retry" {
     var reopened = try DeliveryOutbox.init(std.testing.allocator, path);
     defer reopened.deinit();
     try std.testing.expectEqual(@as(usize, 1), reopened.pendingCount());
+}
+
+// Regression: a post-send crash must not cause the same durable job to become ready again.
+test "delivery outbox persists delivered acknowledgement across restart" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_root);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp_root, "outbox.json" });
+    defer std.testing.allocator.free(path);
+
+    var outbox = try DeliveryOutbox.init(std.testing.allocator, path);
+    defer outbox.deinit();
+
+    var msg = try bus.makeOutbound(std.testing.allocator, "qq", "chat-1", "hello");
+    defer msg.deinit(std.testing.allocator);
+
+    const id = try outbox.enqueueFinal(msg);
+    var claimed = (try outbox.claimNextReady(std.testing.allocator, 0)).?;
+    claimed.deinit(std.testing.allocator);
+
+    try outbox.recordDelivered(id, 1234);
+    try std.testing.expectEqual(@as(usize, 0), outbox.pendingCount());
+    try std.testing.expect((try outbox.claimNextReady(std.testing.allocator, 1234)) == null);
+
+    var reopened = try DeliveryOutbox.init(std.testing.allocator, path);
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(usize, 0), reopened.pendingCount());
+    try std.testing.expect((try reopened.claimNextReady(std.testing.allocator, 1234)) == null);
+
+    try std.testing.expectEqual(@as(usize, 1), try reopened.purgePersistedDelivered());
+    try std.testing.expectEqual(@as(usize, 0), reopened.pendingCount());
 }
