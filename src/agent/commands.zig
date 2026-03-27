@@ -3462,12 +3462,7 @@ pub fn composeFinalReply(
 
     if (show_reasoning) {
         try w.writeAll("Reasoning:\n");
-        var lines = std.mem.splitScalar(u8, reasoning_content.?, '\n');
-        while (lines.next()) |line| {
-            try w.writeAll("> ");
-            try w.writeAll(line);
-            try w.writeAll("\n");
-        }
+        try w.writeAll(reasoning_content.?);
         try w.writeAll("\n\n");
     }
     try w.writeAll(base_text);
