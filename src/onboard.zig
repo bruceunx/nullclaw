@@ -1145,6 +1145,92 @@ fn parseModelWizardInput(input: []const u8, visible_count: usize) ModelWizardInp
     return .{ .typed_model = input };
 }
 
+const ProviderSelection = struct {
+    key: []const u8,
+    default_model: []const u8,
+    env_var: []const u8,
+    base_url: ?[]const u8 = null,
+};
+
+fn appendOrReplaceProviderEntry(
+    cfg: *Config,
+    provider_name: []const u8,
+    api_key: ?[]const u8,
+    base_url: ?[]const u8,
+) !void {
+    var replace_idx: ?usize = null;
+    for (cfg.providers, 0..) |entry, idx| {
+        if (std.mem.eql(u8, entry.name, provider_name)) {
+            replace_idx = idx;
+            break;
+        }
+    }
+
+    const new_len = if (replace_idx != null) cfg.providers.len else cfg.providers.len + 1;
+    const entries = try cfg.allocator.alloc(config_mod.ProviderEntry, new_len);
+
+    var out_idx: usize = 0;
+    for (cfg.providers, 0..) |entry, idx| {
+        if (replace_idx != null and idx == replace_idx.?) {
+            entries[out_idx] = .{
+                .name = try cfg.allocator.dupe(u8, provider_name),
+                .api_key = if (api_key) |value| try cfg.allocator.dupe(u8, value) else null,
+                .base_url = if (base_url) |value| try cfg.allocator.dupe(u8, value) else null,
+            };
+        } else {
+            entries[out_idx] = entry;
+        }
+        out_idx += 1;
+    }
+
+    if (replace_idx == null) {
+        entries[out_idx] = .{
+            .name = try cfg.allocator.dupe(u8, provider_name),
+            .api_key = if (api_key) |value| try cfg.allocator.dupe(u8, value) else null,
+            .base_url = if (base_url) |value| try cfg.allocator.dupe(u8, value) else null,
+        };
+    }
+
+    cfg.providers = entries;
+}
+
+fn promptProviderSelection(
+    allocator: std.mem.Allocator,
+    out: *std.Io.Writer,
+    input_buf: []u8,
+) !?ProviderSelection {
+    try out.writeAll("    Available providers:\n");
+    for (known_providers, 0..) |p, i| {
+        try out.print("      [{d}] {s}\n", .{ i + 1, p.label });
+    }
+    try out.print("      [{d}] Custom OpenAI-compatible provider (custom:https://.../v1)\n", .{known_providers.len + 1});
+    try out.writeAll("    Choice [1]: ");
+    const provider_idx = promptChoice(out, input_buf, known_providers.len + 1, 0) orelse return null;
+
+    if (provider_idx < known_providers.len) {
+        const provider = known_providers[provider_idx];
+        return .{
+            .key = provider.key,
+            .default_model = provider.default_model,
+            .env_var = provider.env_var,
+        };
+    }
+
+    try out.writeAll("    Enter custom base URL (must include version segment, e.g. https://host/v1): ");
+    while (true) {
+        const custom_url = prompt(out, input_buf, "", "") orelse return null;
+        if (isValidCustomProviderUrl(custom_url)) {
+            return .{
+                .key = try std.fmt.allocPrint(allocator, "custom:{s}", .{custom_url}),
+                .default_model = "gpt-5.2",
+                .env_var = "API_KEY",
+                .base_url = try allocator.dupe(u8, custom_url),
+            };
+        }
+        try out.writeAll("    Invalid URL. It must start with http:// or https:// and include a version path like /v1. Try again: ");
+    }
+}
+
 fn isFreeModelId(model_id: []const u8) bool {
     return std.mem.endsWith(u8, model_id, ":free");
 }
@@ -1975,54 +2061,22 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
 
     // ── Step 1: Provider selection ──
     try out.writeAll("  Step 1/8: Select a provider\n");
-    for (known_providers, 0..) |p, i| {
-        try out.print("    [{d}] {s}\n", .{ i + 1, p.label });
-    }
-    try out.print("    [{d}] Custom OpenAI-compatible provider (custom:https://.../v1)\n", .{known_providers.len + 1});
-    try out.writeAll("  Choice [1]: ");
-    const provider_idx = promptChoice(out, &input_buf, known_providers.len + 1, 0) orelse {
+    const provider_selection = (try promptProviderSelection(cfg.allocator, out, &input_buf)) orelse {
         try out.writeAll("\n  Aborted.\n");
         try out.flush();
         return;
     };
-
-    if (provider_idx < known_providers.len) {
-        const provider = known_providers[provider_idx];
-        cfg.default_provider = provider.key;
-        try out.print("  -> {s}\n\n", .{provider.label});
-    } else {
-        // Custom provider - prompt for URL
-        var custom_url_buf: [512]u8 = undefined;
-        try out.writeAll("\n  Custom provider configuration:\n");
-        try out.writeAll("  Enter OpenAI-compatible endpoint URL (e.g., https://api.example.com/v1): ");
-        const custom_url = prompt(out, &custom_url_buf, "", "") orelse {
-            try out.writeAll("\n  Aborted.\n");
-            try out.flush();
-            return;
-        };
-        if (custom_url.len == 0) {
-            try out.writeAll("\n  Error: Custom provider URL cannot be empty\n");
-            try out.flush();
-            return;
-        }
-        if (!isValidCustomProviderUrl(custom_url)) {
-            try out.writeAll("\n  Error: endpoint must be http(s) and include a version segment like /v1\n");
-            try out.flush();
-            return;
-        }
-        const custom_provider_key = try std.fmt.allocPrint(cfg.allocator, "custom:{s}", .{custom_url});
-        cfg.default_provider = custom_provider_key;
-
-        // Add to providers section with base_url
-        const entries = try cfg.allocator.alloc(config_mod.ProviderEntry, 1);
-        entries[0] = .{ .name = try cfg.allocator.dupe(u8, cfg.default_provider), .base_url = try cfg.allocator.dupe(u8, custom_url) };
-        cfg.providers = entries;
-
+    cfg.default_provider = provider_selection.key;
+    if (provider_selection.base_url) |custom_url| {
+        try appendOrReplaceProviderEntry(&cfg, cfg.default_provider, null, custom_url);
         try out.print("  -> Custom: {s}\n\n", .{custom_url});
+    } else if (findProviderInfoByCanonical(cfg.default_provider)) |info| {
+        try out.print("  -> {s}\n\n", .{info.label});
+    } else {
+        try out.print("  -> {s}\n\n", .{cfg.default_provider});
     }
 
-    const is_azure_provider = provider_idx < known_providers.len and
-        std.mem.eql(u8, known_providers[provider_idx].key, "azure");
+    const is_azure_provider = std.mem.eql(u8, canonicalProviderName(cfg.default_provider), "azure");
 
     var provider_base_url: ?[]const u8 = null;
     if (cfg.providers.len > 0 and cfg.providers[0].base_url != null) {
@@ -2053,7 +2107,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     }
 
     // ── Step 2: API key ──
-    const env_hint = if (provider_idx < known_providers.len) known_providers[provider_idx].env_var else "API_KEY";
+    const env_hint = provider_selection.env_var;
     const requires_api_key = providerRequiresApiKeyForSetup(cfg.default_provider, provider_base_url);
     if (requires_api_key) {
         try out.print("  Step 2/8: Enter API key (or press Enter to use env var {s}): ", .{env_hint});
@@ -2063,23 +2117,11 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
             return;
         };
         if (api_key_input.len > 0) {
-            // Store in providers section (preserve base_url if already set for custom provider)
-            const entries = try cfg.allocator.alloc(config_mod.ProviderEntry, 1);
-            entries[0] = .{
-                .name = try cfg.allocator.dupe(u8, cfg.default_provider),
-                .api_key = try cfg.allocator.dupe(u8, api_key_input),
-                .base_url = provider_base_url,
-            };
-            cfg.providers = entries;
+            try appendOrReplaceProviderEntry(&cfg, cfg.default_provider, api_key_input, provider_base_url);
             try out.writeAll("  -> API key set\n\n");
         } else {
             if (is_azure_provider) {
-                const entries = try cfg.allocator.alloc(config_mod.ProviderEntry, 1);
-                entries[0] = .{
-                    .name = try cfg.allocator.dupe(u8, cfg.default_provider),
-                    .base_url = provider_base_url,
-                };
-                cfg.providers = entries;
+                try appendOrReplaceProviderEntry(&cfg, cfg.default_provider, null, provider_base_url);
             }
             try out.print("  -> Will use ${s} from environment\n\n", .{env_hint});
         }
@@ -2097,10 +2139,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     }
 
     // ── Step 3: Model (with live fetching) ──
-    const default_model_for_provider = if (provider_idx < known_providers.len)
-        known_providers[provider_idx].default_model
-    else
-        "gpt-5.2";
+    const default_model_for_provider = provider_selection.default_model;
 
     try out.writeAll("  Step 3/8: Select a model\n");
     try out.writeAll("  Fetching available models...\n");
@@ -2214,6 +2253,66 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         cfg.default_model = try cfg.allocator.dupe(u8, model_input);
     }
     try out.print("  -> {s}\n\n", .{cfg.default_model.?});
+
+    while (true) {
+        try out.writeAll("  Add another provider? [y/N]: ");
+        const add_more = prompt(out, &input_buf, "", "n") orelse {
+            try out.writeAll("\n  Aborted.\n");
+            try out.flush();
+            return;
+        };
+        if (add_more.len == 0 or !(add_more[0] == 'y' or add_more[0] == 'Y')) break;
+
+        try out.writeAll("\n  Additional provider setup:\n");
+        const extra_provider = (try promptProviderSelection(cfg.allocator, out, &input_buf)) orelse {
+            try out.writeAll("\n  Aborted.\n");
+            try out.flush();
+            return;
+        };
+
+        const extra_is_azure = std.mem.eql(u8, canonicalProviderName(extra_provider.key), "azure");
+        var extra_base_url: ?[]const u8 = extra_provider.base_url;
+
+        if (extra_is_azure) {
+            var azure_endpoint_buf: [512]u8 = undefined;
+            const default_endpoint = extra_base_url orelse "";
+            if (default_endpoint.len > 0) {
+                try out.print("    Azure OpenAI endpoint [{s}]: ", .{default_endpoint});
+            } else {
+                try out.writeAll("    Azure OpenAI endpoint (e.g., https://your-resource.openai.azure.com): ");
+            }
+            const azure_endpoint = prompt(out, &azure_endpoint_buf, "", default_endpoint) orelse {
+                try out.writeAll("\n  Aborted.\n");
+                try out.flush();
+                return;
+            };
+            if (azure_endpoint.len == 0) {
+                try out.writeAll("\n  Error: Azure OpenAI endpoint is required\n");
+                try out.flush();
+                return;
+            }
+            extra_base_url = try cfg.allocator.dupe(u8, azure_endpoint);
+        }
+
+        if (providerRequiresApiKeyForSetup(extra_provider.key, extra_base_url)) {
+            try out.print("    API key for {s} (or press Enter to use env var {s}): ", .{ extra_provider.key, extra_provider.env_var });
+            const api_key_input = prompt(out, &input_buf, "", "") orelse {
+                try out.writeAll("\n  Aborted.\n");
+                try out.flush();
+                return;
+            };
+            if (api_key_input.len > 0) {
+                try appendOrReplaceProviderEntry(&cfg, extra_provider.key, api_key_input, extra_base_url);
+                try out.writeAll("    -> API key set\n\n");
+            } else {
+                try appendOrReplaceProviderEntry(&cfg, extra_provider.key, null, extra_base_url);
+                try out.print("    -> Will use ${s} from environment\n\n", .{extra_provider.env_var});
+            }
+        } else {
+            try appendOrReplaceProviderEntry(&cfg, extra_provider.key, null, extra_base_url);
+            try out.writeAll("    -> No API key required\n\n");
+        }
+    }
 
     // ── Step 4: Memory backend ──
     const backends = try selectableBackendsForWizard(allocator);
@@ -2348,8 +2447,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try out.print("  [OK] Workspace:  {s}\n", .{cfg.workspace_dir});
     try out.print("  [OK] Config:     {s}\n", .{cfg.config_path});
     try out.writeAll("\n  Next steps:\n");
-    const final_env_hint = if (provider_idx < known_providers.len) known_providers[provider_idx].env_var else "API_KEY";
-    try printProviderNextSteps(out, cfg.default_provider, final_env_hint, requires_api_key, cfg.defaultProviderKey() != null);
+    try printProviderNextSteps(out, cfg.default_provider, provider_selection.env_var, requires_api_key, cfg.defaultProviderKey() != null);
     try out.writeAll("\n");
     try out.flush();
 }
@@ -3286,6 +3384,31 @@ test "StdinLineReader flushRemainder returns final unterminated line" {
 
 test "BANNER contains descriptive text" {
     try std.testing.expect(std.mem.indexOf(u8, BANNER, "smallest AI assistant") != null);
+}
+
+test "appendOrReplaceProviderEntry appends a second provider without dropping the first" {
+    var cfg = try initFreshConfig(std.testing.allocator);
+    defer cfg.deinit();
+
+    try appendOrReplaceProviderEntry(&cfg, "openrouter", "sk-or-test", null);
+    try appendOrReplaceProviderEntry(&cfg, "moonshot", "sk-ms-test", null);
+
+    try std.testing.expectEqual(@as(usize, 2), cfg.providers.len);
+    try std.testing.expectEqualStrings("openrouter", cfg.providers[0].name);
+    try std.testing.expectEqualStrings("moonshot", cfg.providers[1].name);
+}
+
+test "appendOrReplaceProviderEntry replaces existing provider entry in place" {
+    var cfg = try initFreshConfig(std.testing.allocator);
+    defer cfg.deinit();
+
+    try appendOrReplaceProviderEntry(&cfg, "openrouter", "sk-or-test", null);
+    try appendOrReplaceProviderEntry(&cfg, "openrouter", "sk-or-updated", "https://openrouter.ai/api/v1");
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.providers.len);
+    try std.testing.expectEqualStrings("openrouter", cfg.providers[0].name);
+    try std.testing.expectEqualStrings("sk-or-updated", cfg.providers[0].api_key.?);
+    try std.testing.expectEqualStrings("https://openrouter.ai/api/v1", cfg.providers[0].base_url.?);
 }
 
 test "scaffoldWorkspace creates core files and leaves MEMORY.md optional" {
