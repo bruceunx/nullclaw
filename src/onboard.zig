@@ -3007,16 +3007,37 @@ pub fn defaultBackendKey() []const u8 {
 
 // ── Path helpers ─────────────────────────────────────────────────
 
-fn getDefaultWorkspace(allocator: std.mem.Allocator) ![]const u8 {
+fn getEnvVarOwnedOrNull(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
+    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+}
+
+fn getDefaultConfigDir(allocator: std.mem.Allocator) ![]const u8 {
+    if (try getEnvVarOwnedOrNull(allocator, "NULLCLAW_HOME")) |config_dir| {
+        return config_dir;
+    }
+
     const home = try platform.getHomeDir(allocator);
     defer allocator.free(home);
-    return std.fs.path.join(allocator, &.{ home, ".nullclaw", "workspace" });
+    return std.fs.path.join(allocator, &.{ home, ".nullclaw" });
+}
+
+fn getDefaultWorkspace(allocator: std.mem.Allocator) ![]const u8 {
+    if (try getEnvVarOwnedOrNull(allocator, "NULLCLAW_WORKSPACE")) |workspace_dir| {
+        return workspace_dir;
+    }
+
+    const config_dir = try getDefaultConfigDir(allocator);
+    defer allocator.free(config_dir);
+    return std.fs.path.join(allocator, &.{ config_dir, "workspace" });
 }
 
 fn getDefaultConfigPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = try platform.getHomeDir(allocator);
-    defer allocator.free(home);
-    return std.fs.path.join(allocator, &.{ home, ".nullclaw", "config.json" });
+    const config_dir = try getDefaultConfigDir(allocator);
+    defer allocator.free(config_dir);
+    return std.fs.path.join(allocator, &.{ config_dir, "config.json" });
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -3882,6 +3903,67 @@ test "providerEnvVar deepseek" {
 
 test "providerEnvVar groq" {
     try std.testing.expectEqualStrings("GROQ_API_KEY", providerEnvVar("groq"));
+}
+
+fn setTestEnvVar(name: []const u8, value: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const c = @cImport({
+        @cInclude("stdlib.h");
+    });
+
+    const name_z = try std.testing.allocator.dupeZ(u8, name);
+    defer std.testing.allocator.free(name_z);
+    const value_z = try std.testing.allocator.dupeZ(u8, value);
+    defer std.testing.allocator.free(value_z);
+
+    try std.testing.expectEqual(@as(c_int, 0), c.setenv(name_z.ptr, value_z.ptr, 1));
+}
+
+fn unsetTestEnvVar(name: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const c = @cImport({
+        @cInclude("stdlib.h");
+    });
+
+    const name_z = try std.testing.allocator.dupeZ(u8, name);
+    defer std.testing.allocator.free(name_z);
+
+    try std.testing.expectEqual(@as(c_int, 0), c.unsetenv(name_z.ptr));
+}
+
+fn restoreTestEnvVar(name: []const u8, previous: ?[]u8) void {
+    if (builtin.os.tag == .windows) return;
+
+    if (previous) |value| {
+        setTestEnvVar(name, value) catch unreachable;
+        std.testing.allocator.free(value);
+        return;
+    }
+
+    unsetTestEnvVar(name) catch unreachable;
+}
+
+test "initFreshConfig honors nullclaw env overrides" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const prev_home = try getEnvVarOwnedOrNull(allocator, "NULLCLAW_HOME");
+    defer restoreTestEnvVar("NULLCLAW_HOME", prev_home);
+    const prev_workspace = try getEnvVarOwnedOrNull(allocator, "NULLCLAW_WORKSPACE");
+    defer restoreTestEnvVar("NULLCLAW_WORKSPACE", prev_workspace);
+
+    // Regression: Docker onboarding relies on these env vars so the fresh
+    // config fallback must not drift back to HOME/.nullclaw paths.
+    try setTestEnvVar("NULLCLAW_HOME", "/tmp/nullclaw-container-home");
+    try setTestEnvVar("NULLCLAW_WORKSPACE", "/tmp/nullclaw-container-workspace");
+
+    var cfg = try initFreshConfig(allocator);
+    defer cfg.deinit();
+
+    try std.testing.expectEqualStrings("/tmp/nullclaw-container-home/config.json", cfg.config_path);
+    try std.testing.expectEqualStrings("/tmp/nullclaw-container-workspace", cfg.workspace_dir);
 }
 
 test "known_providers all have non-empty fields" {
