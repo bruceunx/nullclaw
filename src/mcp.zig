@@ -33,6 +33,7 @@ pub const McpServer = struct {
     name: []const u8,
     config: McpServerConfig,
     child: ?std.process.Child,
+    child_env: ?std.process.EnvMap,
     http_client: ?std.http.Client,
     next_id: u32,
     mcp_session_id: ?[]u8,
@@ -43,6 +44,7 @@ pub const McpServer = struct {
             .name = config.name,
             .config = config,
             .child = null,
+            .child_env = null,
             .http_client = null,
             .next_id = 1,
             .mcp_session_id = null,
@@ -97,6 +99,7 @@ pub const McpServer = struct {
 
         // Build environment: inherit parent + config overrides
         var env = std.process.EnvMap.init(self.allocator);
+        errdefer env.deinit();
         // Add PATH, HOME, etc. from parent
         const inherit_vars = [_][]const u8{
             "PATH",              "HOME",        "TERM",    "LANG",         "LC_ALL",
@@ -120,6 +123,7 @@ pub const McpServer = struct {
 
         try child.spawn();
         self.child = child;
+        self.child_env = env;
     }
 
     fn connectHttp(self: *McpServer) !void {
@@ -173,6 +177,10 @@ pub const McpServer = struct {
             _ = child.wait() catch {};
         }
         self.child = null;
+        if (self.child_env) |*env| {
+            env.deinit();
+            self.child_env = null;
+        }
     }
 
     // ── Internal I/O ────────────────────────────────────────────

@@ -35,6 +35,7 @@ const Agent = @import("root.zig").Agent;
 const CliStreamCtx = struct {
     sink: streaming.Sink,
     emitted_text: bool = false,
+    filter: streaming.TagFilter = undefined,
 };
 
 const CliProviderContext = struct {
@@ -65,6 +66,11 @@ fn cliStreamSinkCallback(_: *anyopaque, event: streaming.Event) void {
     const wr = &bw.interface;
     wr.print("{s}", .{event.text}) catch {};
     wr.flush() catch {};
+}
+
+fn makeCliStreamSink(raw_sink: streaming.Sink, filter: *streaming.TagFilter) streaming.Sink {
+    filter.* = streaming.TagFilter.init(raw_sink);
+    return filter.sink();
 }
 
 /// Streaming callback that forwards provider chunks into unified stream sink events.
@@ -486,13 +492,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         defer agent.deinit();
 
         // Enable streaming if provider supports it
-        var stream_sink_ctx: u8 = 0;
         var stream_ctx = CliStreamCtx{
-            .sink = .{
-                .callback = cliStreamSinkCallback,
-                .ctx = @ptrCast(&stream_sink_ctx),
-            },
+            .sink = undefined,
         };
+        const raw_stream_sink = streaming.Sink{
+            .callback = cliStreamSinkCallback,
+            .ctx = @ptrCast(&stream_ctx),
+        };
+        stream_ctx.sink = makeCliStreamSink(raw_stream_sink, &stream_ctx.filter);
         if (supports_streaming) {
             agent.stream_callback = cliStreamCallback;
             agent.stream_ctx = @ptrCast(&stream_ctx);
@@ -594,13 +601,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     defer agent.deinit();
 
     // Enable streaming if provider supports it
-    var stream_sink_ctx: u8 = 0;
     var stream_ctx = CliStreamCtx{
-        .sink = .{
-            .callback = cliStreamSinkCallback,
-            .ctx = @ptrCast(&stream_sink_ctx),
-        },
+        .sink = undefined,
     };
+    const raw_stream_sink = streaming.Sink{
+        .callback = cliStreamSinkCallback,
+        .ctx = @ptrCast(&stream_ctx),
+    };
+    stream_ctx.sink = makeCliStreamSink(raw_stream_sink, &stream_ctx.filter);
     if (supports_streaming) {
         agent.stream_callback = cliStreamCallback;
         agent.stream_ctx = @ptrCast(&stream_ctx);
@@ -827,6 +835,37 @@ test "cliStreamCallback text delta chunk" {
     try std.testing.expectEqualStrings("hello", chunk.delta);
     try std.testing.expect(!chunk.is_final);
     try std.testing.expectEqual(@as(u32, 2), chunk.token_count);
+    try std.testing.expect(ctx.emitted_text);
+}
+
+test "makeCliStreamSink strips streamed tool_call markup" {
+    const Collector = struct {
+        buf: [128]u8 = undefined,
+        len: usize = 0,
+
+        fn callback(ctx_ptr: *anyopaque, event: streaming.Event) void {
+            if (event.stage != .chunk or event.text.len == 0) return;
+            const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            @memcpy(self.buf[self.len..][0..event.text.len], event.text);
+            self.len += event.text.len;
+        }
+    };
+
+    var collector = Collector{};
+    var filter: streaming.TagFilter = undefined;
+    const raw_sink = streaming.Sink{
+        .callback = Collector.callback,
+        .ctx = @ptrCast(&collector),
+    };
+    const filtered_sink = makeCliStreamSink(raw_sink, &filter);
+
+    var ctx = CliStreamCtx{ .sink = filtered_sink };
+    cliStreamCallback(@ptrCast(&ctx), providers.StreamChunk.textDelta(
+        "Let me check the projects for you.<tool_call>{\"name\":\"mcp_vikunja_vikunja_list_projects\",\"arguments\":{}}</tool_call>",
+    ));
+    cliStreamCallback(@ptrCast(&ctx), providers.StreamChunk.finalChunk());
+
+    try std.testing.expectEqualStrings("Let me check the projects for you.", collector.buf[0..collector.len]);
     try std.testing.expect(ctx.emitted_text);
 }
 
