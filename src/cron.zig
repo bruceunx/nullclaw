@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const config_paths = @import("config_paths.zig");
 const platform = @import("platform.zig");
 const bus = @import("bus.zig");
 const fs_compat = @import("fs_compat.zig");
@@ -1651,43 +1652,20 @@ const JsonCronJob = struct {
     delivery_to: ?[]const u8 = null,
 };
 
-/// Shared by runtime code and regression tests so NULLCLAW_HOME precedence
-/// stays deterministic without relying on process-global environment state.
-fn resolveConfigDirFromInputs(
-    allocator: std.mem.Allocator,
-    nullclaw_home: ?[]const u8,
-    home_dir: ?[]const u8,
-) ![]const u8 {
-    if (nullclaw_home) |dir| return allocator.dupe(u8, dir);
-    const home = home_dir orelse return error.HomeDirNotFound;
-    return std.fs.path.join(allocator, &.{ home, ".nullclaw" });
-}
-
-/// Resolve the NullClaw config directory.
-/// Checks NULLCLAW_HOME first, falls back to ~/.nullclaw/.
-/// Mirrors the logic in Config.load() (src/config.zig).
-/// Caller owns the returned slice.
-fn resolveConfigDir(allocator: std.mem.Allocator) ![]const u8 {
-    if (platform.getEnvOrNull(allocator, "NULLCLAW_HOME")) |dir| return dir;
-    const home_dir = try platform.getHomeDir(allocator);
-    defer allocator.free(home_dir);
-    return resolveConfigDirFromInputs(allocator, null, home_dir);
-}
-
 fn cronJsonPathFromDir(allocator: std.mem.Allocator, config_dir: []const u8) ![]const u8 {
-    return std.fs.path.join(allocator, &.{ config_dir, "cron.json" });
+    return config_paths.pathFromConfigDir(allocator, config_dir, "cron.json");
 }
 
 /// Get the cron.json path inside the config directory.
 fn cronJsonPath(allocator: std.mem.Allocator) ![]const u8 {
-    const dir = try resolveConfigDir(allocator);
+    const dir = try config_paths.defaultConfigDir(allocator);
     defer allocator.free(dir);
     return cronJsonPathFromDir(allocator, dir);
 }
 
 /// Ensure the config directory exists.
 fn ensureCronDir(allocator: std.mem.Allocator) !void {
-    const dir = try resolveConfigDir(allocator);
+    const dir = try config_paths.defaultConfigDir(allocator);
     defer allocator.free(dir);
     std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -1695,7 +1673,7 @@ fn ensureCronDir(allocator: std.mem.Allocator) !void {
     };
 }
 
-/// Save scheduler jobs to ~/.nullclaw/cron.json.
+/// Save scheduler jobs to cron.json in the config directory.
 pub fn saveJobs(scheduler: *const CronScheduler) !void {
     try ensureCronDir(scheduler.allocator);
     const path = try cronJsonPath(scheduler.allocator);
@@ -1817,12 +1795,12 @@ pub fn saveJobs(scheduler: *const CronScheduler) !void {
     try writeFileAtomic(scheduler.allocator, path, buf.items);
 }
 
-/// Load jobs from ~/.nullclaw/cron.json into the scheduler.
+/// Load jobs from cron.json in the config directory into the scheduler.
 pub fn loadJobs(scheduler: *CronScheduler) !void {
     try loadJobsWithPolicy(scheduler, .best_effort);
 }
 
-/// Load jobs from ~/.nullclaw/cron.json; unlike loadJobs, this returns
+/// Load jobs from cron.json in the config directory; unlike loadJobs, this returns
 /// parse/read errors (except missing file/path).
 pub fn loadJobsStrict(scheduler: *CronScheduler) !void {
     try loadJobsWithPolicy(scheduler, .strict);
@@ -1895,9 +1873,9 @@ fn trimOwnedRight(allocator: std.mem.Allocator, raw: []u8) ?[]u8 {
 /// Try to read the gateway URL from daemon_state.json in the config directory.
 /// Returns an allocated string like "http://127.0.0.1:3000" or null.
 fn readGatewayUrl(allocator: std.mem.Allocator) ?[]const u8 {
-    const dir = resolveConfigDir(allocator) catch return null;
+    const dir = config_paths.defaultConfigDir(allocator) catch return null;
     defer allocator.free(dir);
-    const state_path = std.fs.path.join(allocator, &.{ dir, "daemon_state.json" }) catch return null;
+    const state_path = config_paths.pathFromConfigDir(allocator, dir, "daemon_state.json") catch return null;
     defer allocator.free(state_path);
 
     const content = fs_compat.readFileAlloc(std.fs.cwd(), allocator, state_path, 64 * 1024) catch return null;
@@ -1921,9 +1899,9 @@ fn readGatewayUrl(allocator: std.mem.Allocator) ?[]const u8 {
 
 /// Read the paired bearer token from paired_token in the config directory (if present).
 fn readPairedToken(allocator: std.mem.Allocator) ?[]const u8 {
-    const dir = resolveConfigDir(allocator) catch return null;
+    const dir = config_paths.defaultConfigDir(allocator) catch return null;
     defer allocator.free(dir);
-    const token_path = std.fs.path.join(allocator, &.{ dir, "paired_token" }) catch return null;
+    const token_path = config_paths.pathFromConfigDir(allocator, dir, "paired_token") catch return null;
     defer allocator.free(token_path);
     const raw = fs_compat.readFileAlloc(std.fs.cwd(), allocator, token_path, 4096) catch return null;
     return trimOwnedRight(allocator, raw);
@@ -3746,7 +3724,7 @@ test "tick reschedules anchored recurring job using cron expression" {
 // Regression: #691 — NULLCLAW_HOME must override the HOME-based fallback.
 test "resolveConfigDir prefers NULLCLAW_HOME override" {
     const allocator = std.testing.allocator;
-    const dir = try resolveConfigDirFromInputs(allocator, "test-nullclaw-data", "ignored-home");
+    const dir = try config_paths.defaultConfigDirFromInputs(allocator, "test-nullclaw-data", "ignored-home");
     defer allocator.free(dir);
     try std.testing.expectEqualStrings("test-nullclaw-data", dir);
 }
@@ -3754,7 +3732,7 @@ test "resolveConfigDir prefers NULLCLAW_HOME override" {
 // Regression: #691 — without NULLCLAW_HOME, cron.zig must use HOME/.nullclaw.
 test "resolveConfigDir falls back to HOME/.nullclaw when NULLCLAW_HOME unset" {
     const allocator = std.testing.allocator;
-    const dir = try resolveConfigDirFromInputs(allocator, null, "test-home");
+    const dir = try config_paths.defaultConfigDirFromInputs(allocator, null, "test-home");
     defer allocator.free(dir);
 
     const expected = try std.fs.path.join(allocator, &.{ "test-home", ".nullclaw" });
@@ -3776,5 +3754,5 @@ test "cronJsonPath appends cron.json to resolved config dir" {
 }
 
 test "resolveConfigDir reports missing home when no config directory inputs exist" {
-    try std.testing.expectError(error.HomeDirNotFound, resolveConfigDirFromInputs(std.testing.allocator, null, null));
+    try std.testing.expectError(error.HomeDirNotFound, config_paths.defaultConfigDirFromInputs(std.testing.allocator, null, null));
 }
