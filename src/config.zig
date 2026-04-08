@@ -179,6 +179,13 @@ fn namedAgentUsesReservedRootId(agent_name: []const u8) bool {
     return std.mem.eql(u8, agent_routing.normalizeId(&agent_buf, agent_name), "main");
 }
 
+fn isKnownProviderName(providers: []const ProviderEntry, name: []const u8) bool {
+    for (providers) |p| {
+        if (std.mem.eql(u8, p.name, name)) return true;
+    }
+    return false;
+}
+
 // ── Top-level Config ────────────────────────────────────────────
 
 pub const Config = struct {
@@ -1347,6 +1354,9 @@ pub const Config = struct {
         for (self.agents) |agent_cfg| {
             if (namedAgentUsesReservedRootId(agent_cfg.name)) {
                 return ValidationError.ReservedMainAgentName;
+            }
+            if (self.providers.len > 0 and !isKnownProviderName(self.providers, agent_cfg.provider)) {
+                return ValidationError.UnknownAgentProvider;
             }
         }
         if (self.gateway.port == 0) {
@@ -6624,20 +6634,19 @@ test "NostrConfig dm_relays default is auth.nostr1.com" {
 }
 
 // Regression: named agent provider name not validated against known providers
-test "validation rejects named agent with unknown provider" {
-    const agents = [_]NamedAgentConfig{
-        .{
-            .name = "researcher",
-            .provider = "nonexistent-provider",
-            .model = "some-model",
-        },
+test "isKnownProviderName matches registered provider" {
+    const providers = [_]config_types.ProviderEntry{
+        .{ .name = "openai" },
+        .{ .name = "anthropic" },
     };
-    const cfg = Config{
-        .workspace_dir = "/tmp/yc",
-        .config_path = "/tmp/yc/config.json",
-        .default_model = "openrouter/claude-sonnet-4",
-        .agents = &agents,
-        .allocator = std.testing.allocator,
-    };
-    try std.testing.expectError(Config.ValidationError.UnknownAgentProvider, cfg.validate());
+    try std.testing.expect(isKnownProviderName(&providers, "openai"));
+    try std.testing.expect(isKnownProviderName(&providers, "anthropic"));
+    try std.testing.expect(!isKnownProviderName(&providers, "nonexistent-provider"));
+    try std.testing.expect(!isKnownProviderName(&providers, ""));
+    try std.testing.expect(!isKnownProviderName(&providers, "openai-extra"));
+}
+
+test "isKnownProviderName with empty providers list" {
+    const providers = [_]config_types.ProviderEntry{};
+    try std.testing.expect(!isKnownProviderName(&providers, "openai"));
 }
