@@ -639,6 +639,7 @@ Practical rules:
 
 - Keep `listen = "127.0.0.1"` for the pairing-first local UX.
 - In local transport, unauthenticated WebSocket upgrade is allowed only on loopback. This is what lets a UI connect first and then send `pairing_request`.
+- Local loopback pairing no longer depends on a fixed shared code. `pairing_request` may omit `payload.pairing_code`, and legacy loopback clients that still send `123456` remain compatible.
 - If you change `listen` to `0.0.0.0` or another non-loopback address, the WebSocket upgrade must already include the channel token:
   - `ws://host:32123/ws?token=<auth_token>`
   - or `Authorization: Bearer <auth_token>`

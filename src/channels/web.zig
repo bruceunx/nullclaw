@@ -14,8 +14,6 @@ const log = std.log.scoped(.web);
 pub const WebChannel = struct {
     const MAX_E2E_PAYLOAD_BYTES: usize = 65_536;
     const E2E_ALG: []const u8 = "x25519-chacha20poly1305-v1";
-    const LOCAL_FIXED_PAIRING_CODE: []const u8 = "123456";
-
     const RelayTokenSource = enum {
         config,
         env,
@@ -451,7 +449,7 @@ pub const WebChannel = struct {
 
         if (self.transport == .local) {
             if (pairing_enabled) {
-                self.rotateRelayPairingCode("fixed-local");
+                log.info("{s}", .{localPairingLogMessage("ready")});
             }
         } else if (self.relay_pairing_guard) |*guard| {
             if (guard.pairingCode()) |code| {
@@ -487,21 +485,20 @@ pub const WebChannel = struct {
         }) catch "Web relay pairing code generated (value hidden)";
     }
 
-    fn localPairingLogMessage(code: []const u8) []const u8 {
-        _ = code;
-        return "Web local pairing code active (fixed, value hidden)";
+    fn localPairingLogMessage(reason: []const u8) []const u8 {
+        if (std.mem.eql(u8, reason, "ready")) {
+            return "Web local pairing ready (loopback-only, one-time, value hidden)";
+        }
+        return "Web local pairing code rotated (loopback-only, one-time, value hidden)";
     }
 
     fn rotateRelayPairingCodeLocked(self: *WebChannel, reason: []const u8) void {
         if (self.transport == .local) {
             if (self.relay_pairing_guard) |*guard| {
-                const code = guard.setPairingCode(LOCAL_FIXED_PAIRING_CODE) catch |err| {
-                    log.warn("Web local pairing code override failed: {}", .{err});
-                    return;
-                };
+                _ = guard.regeneratePairingCode() orelse return;
                 self.relay_pairing_issued_at = std.time.timestamp();
                 if (!std.mem.eql(u8, reason, "consumed")) {
-                    log.info("{s}", .{localPairingLogMessage(code)});
+                    log.info("{s}", .{localPairingLogMessage(reason)});
                 }
             }
             return;
@@ -862,7 +859,10 @@ pub const WebChannel = struct {
             }
 
             if (self.relay_pairing_guard) |*guard| {
-                const attempt = guard.attemptPair(pairing_code);
+                const attempt = if (self.transport == .local)
+                    guard.attemptPair(guard.pairingCode())
+                else
+                    guard.attemptPair(pairing_code);
                 switch (attempt) {
                     .paired => |token| {
                         self.rotateRelayPairingCodeLocked("consumed");
@@ -1075,7 +1075,7 @@ pub const WebChannel = struct {
 
         log.info("Web channel ready on ws://{s}:{d}{s}", .{ self.listen_address, self.port, self.ws_path });
         switch (token_source) {
-            .ephemeral => log.warn("Web channel one-time optional upgrade token: {s}", .{self.activeToken()}),
+            .ephemeral => log.warn("Web channel generated an optional upgrade token for this run (hidden in logs); set channels.web.auth_token or NULLCLAW_WEB_TOKEN/NULLCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_TOKEN for stable automation", .{}),
             .config, .env => log.info("Web channel optional upgrade auth token active (hidden in logs)", .{}),
         }
         if (self.message_auth_mode == .token) {
@@ -2313,7 +2313,8 @@ test "WebChannel relay pairing request rotates one-time code and initializes e2e
     try std.testing.expectEqual(@as(usize, 1), ch.e2e_sessions.count());
 }
 
-test "WebChannel local pairing code is fixed to 123456 across rotations" {
+// Regression: local loopback pairing must not depend on a fixed shared secret.
+test "WebChannel local pairing request accepts legacy client code and rotates hidden state" {
     var ch = WebChannel.initFromConfig(std.testing.allocator, .{
         .transport = "local",
         .account_id = "local-main",
@@ -2322,11 +2323,28 @@ test "WebChannel local pairing code is fixed to 123456 across rotations" {
     try ch.initRelaySecurityState();
 
     const first = ch.relay_pairing_guard.?.pairingCode() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("123456", first);
+    const first_copy = try std.testing.allocator.dupe(u8, first);
+    defer std.testing.allocator.free(first_copy);
 
-    ch.rotateRelayPairingCode("test-rotate");
+    ch.handleInboundEvent("{\"v\":1,\"type\":\"pairing_request\",\"session_id\":\"sess-local\",\"payload\":{\"pairing_code\":\"123456\"}}", null);
+    try std.testing.expect(ch.relay_pairing_guard.?.isPaired());
     const second = ch.relay_pairing_guard.?.pairingCode() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("123456", second);
+    try std.testing.expect(second.len == 6);
+    try std.testing.expect(!std.mem.eql(u8, first_copy, second));
+}
+
+// Regression: local loopback pairing should remain usable without exposing a fixed code.
+test "WebChannel local pairing request succeeds without pairing_code payload" {
+    var ch = WebChannel.initFromConfig(std.testing.allocator, .{
+        .transport = "local",
+        .account_id = "local-main",
+    });
+    defer ch.deinitRelaySecurityState();
+    try ch.initRelaySecurityState();
+
+    ch.handleInboundEvent("{\"v\":1,\"type\":\"pairing_request\",\"session_id\":\"sess-local\",\"payload\":{}}", null);
+    try std.testing.expect(ch.relay_pairing_guard.?.isPaired());
+    try std.testing.expect(ch.relay_pairing_guard.?.pairingCode() != null);
 }
 
 test "WebChannel local pairing code never expires" {

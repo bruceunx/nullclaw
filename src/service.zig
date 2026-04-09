@@ -18,6 +18,8 @@ const WINDOWS_SERVICE_NAME = "nullclaw";
 const WINDOWS_SERVICE_DISPLAY_NAME = "nullclaw gateway runtime";
 const OPENRC_SERVICE_NAME = "nullclaw";
 const OPENRC_SERVICE_FILE = "/etc/init.d/nullclaw";
+const SERVICE_LAUNCHER_NAME = "service-launch.sh";
+const SERVICE_ENV_HELPER_NAME = "service-env";
 pub const WINDOWS_SERVICE_GATEWAY_ARG = "__windows-service-gateway";
 
 const windows = std.os.windows;
@@ -351,6 +353,10 @@ fn installMacos(allocator: std.mem.Allocator) !void {
 
     const home = try getHomeDir(allocator);
     defer allocator.free(home);
+    const config_dir = try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
+    defer allocator.free(config_dir);
+    const launcher_path = try writeServiceLauncher(allocator, service_exe_path, config_dir);
+    defer allocator.free(launcher_path);
     const logs_dir = try std.fmt.allocPrint(allocator, "{s}/.nullclaw/logs", .{home});
     defer allocator.free(logs_dir);
     std.fs.makeDirAbsolute(logs_dir) catch |err| switch (err) {
@@ -373,7 +379,6 @@ fn installMacos(allocator: std.mem.Allocator) !void {
         \\  <key>ProgramArguments</key>
         \\  <array>
         \\    <string>{s}</string>
-        \\    <string>gateway</string>
         \\  </array>
         \\  <key>RunAtLoad</key>
         \\  <true/>
@@ -385,7 +390,7 @@ fn installMacos(allocator: std.mem.Allocator) !void {
         \\  <string>{s}</string>
         \\</dict>
         \\</plist>
-    , .{ SERVICE_LABEL, xmlEscape(service_exe_path), xmlEscape(stdout_log), xmlEscape(stderr_log) });
+    , .{ SERVICE_LABEL, xmlEscape(launcher_path), xmlEscape(stdout_log), xmlEscape(stderr_log) });
     defer allocator.free(content);
 
     const file = try std.fs.createFileAbsolute(plist, .{});
@@ -452,6 +457,8 @@ fn installLinuxSystemd(allocator: std.mem.Allocator) !void {
     defer allocator.free(home);
     const config_dir = try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
     defer allocator.free(config_dir);
+    const launcher_path = try writeServiceLauncher(allocator, service_exe_path, config_dir);
+    defer allocator.free(launcher_path);
 
     const content = try std.fmt.allocPrint(allocator,
         \\[Unit]
@@ -460,14 +467,14 @@ fn installLinuxSystemd(allocator: std.mem.Allocator) !void {
         \\
         \\[Service]
         \\Type=simple
-        \\ExecStart={s} gateway
+        \\ExecStart={s}
         \\Restart=always
         \\RestartSec=3
         \\EnvironmentFile=-{s}/.env
         \\
         \\[Install]
         \\WantedBy=default.target
-    , .{ service_exe_path, config_dir });
+    , .{ launcher_path, config_dir });
     defer allocator.free(content);
 
     const file = try std.fs.createFileAbsolute(unit, .{});
@@ -494,10 +501,12 @@ fn installLinuxOpenRc(allocator: std.mem.Allocator) !void {
 
     const config_dir = try std.fs.path.join(allocator, &.{ service_home, ".nullclaw" });
     defer allocator.free(config_dir);
+    const launcher_path = try writeServiceLauncher(allocator, service_exe_path, config_dir);
+    defer allocator.free(launcher_path);
 
     const script = try buildOpenRcScript(allocator, .{
         .openrc_run_path = openrc_run_path,
-        .service_exe_path = service_exe_path,
+        .service_command_path = launcher_path,
         .service_user = service_user,
         .service_home = service_home,
         .config_dir = config_dir,
@@ -645,7 +654,7 @@ const CaptureStatus = struct {
 
 const OpenRcScriptConfig = struct {
     openrc_run_path: []const u8,
-    service_exe_path: []const u8,
+    service_command_path: []const u8,
     service_user: ?[]const u8,
     service_home: []const u8,
     config_dir: []const u8,
@@ -779,9 +788,56 @@ fn shellDoubleQuoted(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn buildOpenRcScript(allocator: std.mem.Allocator, cfg: OpenRcScriptConfig) ![]u8 {
-    const exe_quoted = try shellDoubleQuoted(allocator, cfg.service_exe_path);
+fn serviceLauncherPath(allocator: std.mem.Allocator, config_dir: []const u8) ![]const u8 {
+    return std.fs.path.join(allocator, &.{ config_dir, SERVICE_LAUNCHER_NAME });
+}
+
+fn serviceEnvHelperPath(allocator: std.mem.Allocator, config_dir: []const u8) ![]const u8 {
+    return std.fs.path.join(allocator, &.{ config_dir, SERVICE_ENV_HELPER_NAME });
+}
+
+fn buildServiceLauncherScript(allocator: std.mem.Allocator, service_exe_path: []const u8, config_dir: []const u8) ![]u8 {
+    const config_quoted = try shellDoubleQuoted(allocator, config_dir);
+    defer allocator.free(config_quoted);
+    const helper_path = try serviceEnvHelperPath(allocator, config_dir);
+    defer allocator.free(helper_path);
+    const helper_quoted = try shellDoubleQuoted(allocator, helper_path);
+    defer allocator.free(helper_quoted);
+    const exe_quoted = try shellDoubleQuoted(allocator, service_exe_path);
     defer allocator.free(exe_quoted);
+
+    return std.fmt.allocPrint(allocator,
+        \\#!/bin/sh
+        \\set -eu
+        \\export NULLCLAW_HOME={s}
+        \\if [ -x {s} ]; then
+        \\    exec {s} {s} gateway
+        \\fi
+        \\exec {s} gateway
+        \\
+    , .{ config_quoted, helper_quoted, helper_quoted, exe_quoted, exe_quoted });
+}
+
+fn writeServiceLauncher(allocator: std.mem.Allocator, service_exe_path: []const u8, config_dir: []const u8) ![]const u8 {
+    try fs_compat.makePath(config_dir);
+
+    const launcher_path = try serviceLauncherPath(allocator, config_dir);
+    errdefer allocator.free(launcher_path);
+
+    const script = try buildServiceLauncherScript(allocator, service_exe_path, config_dir);
+    defer allocator.free(script);
+
+    const file = try std.fs.createFileAbsolute(launcher_path, .{});
+    defer file.close();
+    try file.writeAll(script);
+    try file.chmod(0o755);
+
+    return launcher_path;
+}
+
+fn buildOpenRcScript(allocator: std.mem.Allocator, cfg: OpenRcScriptConfig) ![]u8 {
+    const command_quoted = try shellDoubleQuoted(allocator, cfg.service_command_path);
+    defer allocator.free(command_quoted);
     const home_quoted = try shellDoubleQuoted(allocator, cfg.service_home);
     defer allocator.free(home_quoted);
     const config_quoted = try shellDoubleQuoted(allocator, cfg.config_dir);
@@ -799,7 +855,6 @@ fn buildOpenRcScript(allocator: std.mem.Allocator, cfg: OpenRcScriptConfig) ![]u
         \\name="nullclaw"
         \\description="nullclaw gateway runtime"
         \\command={s}
-        \\command_args="gateway"
         \\command_background="yes"
         \\pidfile="/run/${{RC_SVCNAME}}.pid"
         \\directory={s}
@@ -809,7 +864,7 @@ fn buildOpenRcScript(allocator: std.mem.Allocator, cfg: OpenRcScriptConfig) ![]u
         \\depend() {{
         \\    need net
         \\}}
-    , .{ cfg.openrc_run_path, exe_quoted, home_quoted, home_quoted, config_quoted, user_line });
+    , .{ cfg.openrc_run_path, command_quoted, home_quoted, home_quoted, config_quoted, user_line });
 }
 
 fn isSystemdUnitNotLoadedDetail(detail: []const u8) bool {
@@ -1227,10 +1282,19 @@ test "parsePasswdHome extracts matching user home" {
     try std.testing.expect(parsePasswdHome(passwd, "bob") == null);
 }
 
+test "buildServiceLauncherScript prefers optional service-env helper" {
+    const script = try buildServiceLauncherScript(std.testing.allocator, "/usr/local/bin/nullclaw", "/home/alice/.nullclaw");
+    defer std.testing.allocator.free(script);
+
+    try std.testing.expect(std.mem.indexOf(u8, script, "export NULLCLAW_HOME=\"/home/alice/.nullclaw\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "exec \"/home/alice/.nullclaw/service-env\" \"/usr/local/bin/nullclaw\" gateway") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "exec \"/usr/local/bin/nullclaw\" gateway") != null);
+}
+
 test "buildOpenRcScript includes user and config env" {
     const script = try buildOpenRcScript(std.testing.allocator, .{
         .openrc_run_path = "/sbin/openrc-run",
-        .service_exe_path = "/usr/local/bin/nullclaw",
+        .service_command_path = "/home/alice/.nullclaw/service-launch.sh",
         .service_user = "alice",
         .service_home = "/home/alice",
         .config_dir = "/home/alice/.nullclaw",
@@ -1238,7 +1302,7 @@ test "buildOpenRcScript includes user and config env" {
     defer std.testing.allocator.free(script);
 
     try std.testing.expect(std.mem.indexOf(u8, script, "#!/sbin/openrc-run") != null);
-    try std.testing.expect(std.mem.indexOf(u8, script, "command=\"/usr/local/bin/nullclaw\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "command=\"/home/alice/.nullclaw/service-launch.sh\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "command_user=\"alice\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "export HOME=\"/home/alice\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "export NULLCLAW_HOME=\"/home/alice/.nullclaw\"") != null);

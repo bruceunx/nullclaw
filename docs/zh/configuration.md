@@ -582,6 +582,7 @@ Telegram forum topics：
 
 - 想使用“先连上再配对”的本地体验，保持 `listen = "127.0.0.1"`。
 - 在 local transport 下，只有 loopback 才允许未鉴权的 WebSocket upgrade；这样 UI 才能先连上，再发送 `pairing_request`。
+- local loopback 配对流程不再依赖固定共享码。`pairing_request` 可以省略 `payload.pairing_code`，仍然发送旧值 `123456` 的 loopback 客户端也保持兼容。
 - 如果把 `listen` 改成 `0.0.0.0` 或其他非 loopback 地址，那么 WebSocket upgrade 一开始就必须带上 channel token：
   - `ws://host:32123/ws?token=<auth_token>`
   - 或 `Authorization: Bearer <auth_token>`
