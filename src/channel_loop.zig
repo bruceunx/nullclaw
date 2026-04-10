@@ -67,6 +67,7 @@ fn providerHasStartupCredentials(
         config.getProviderApiMode(provider_name),
         config.getProviderMaxStreamingPromptBytes(provider_name),
         config.getProviderChatTemplateEnableThinkingParam(provider_name),
+        config.getProviderExtraBodyParams(provider_name),
     );
     defer holder.deinit();
 
@@ -929,6 +930,7 @@ fn processTelegramMessage(
     is_group: bool,
     reply_to_id: ?i64,
     message_sender_id: []const u8,
+    replace_message: bool,
 ) void {
     const typing_target = sender;
     const draft_turn_id = tg_ptr.startTypingTurn(typing_target) catch 0;
@@ -961,6 +963,7 @@ fn processTelegramMessage(
     const conversation_context = buildConversationContext(.{
         .channel = "telegram",
         .account_id = tg_ptr.account_id,
+        .delivery_chat_id = sender,
         .peer_id = sender,
         .is_group = is_group,
         .group_id = if (is_group) sender else null,
@@ -991,11 +994,35 @@ fn processTelegramMessage(
         return;
     }
 
-    tg_ptr.sendAssistantMessageWithReply(sender, message_sender_id, is_group, reply, reply_to_id) catch |err| {
-        tg_ptr.setTaskReaction(sender, message_id, .failed);
-        log.warn("Send error: {}", .{err});
-        return;
-    };
+    if (replace_message and message_id != null) {
+        var payload = telegram.buildOwnedOutboundPayloadFromLegacy(allocator, reply, &.{}, true) catch |err| {
+            tg_ptr.setTaskReaction(sender, message_id, .failed);
+            log.warn("Failed to build telegram edit payload: {}", .{err});
+            return;
+        };
+        defer payload.deinit(allocator);
+        const edit_message_id = std.fmt.allocPrint(allocator, "{d}", .{message_id.?}) catch {
+            tg_ptr.setTaskReaction(sender, message_id, .failed);
+            return;
+        };
+        defer allocator.free(edit_message_id);
+
+        tg_ptr.editRichMessage(.{
+            .target = sender,
+            .message_id = edit_message_id,
+            .payload = payload.payload(),
+        }) catch |err| {
+            tg_ptr.setTaskReaction(sender, message_id, .failed);
+            log.warn("Edit error: {}", .{err});
+            return;
+        };
+    } else {
+        tg_ptr.sendAssistantMessageWithReply(sender, message_sender_id, is_group, reply, reply_to_id) catch |err| {
+            tg_ptr.setTaskReaction(sender, message_id, .failed);
+            log.warn("Send error: {}", .{err});
+            return;
+        };
+    }
     tg_ptr.setTaskReaction(sender, message_id, .done);
 }
 
@@ -1011,6 +1038,7 @@ const MessageTask = struct {
     is_group: bool,
     reply_to_id: ?i64,
     message_sender_id: []const u8,
+    replace_message: bool,
 
     fn run(task: *MessageTask) void {
         processTelegramMessage(
@@ -1024,6 +1052,7 @@ const MessageTask = struct {
             task.is_group,
             task.reply_to_id,
             task.message_sender_id,
+            task.replace_message,
         );
     }
 
@@ -1653,6 +1682,7 @@ pub fn runTelegramLoop(
                         .is_group = msg.is_group,
                         .reply_to_id = reply_to_id,
                         .message_sender_id = task_message_sender_id,
+                        .replace_message = msg.replace_message,
                     };
 
                     const thread = std.Thread.spawn(.{ .stack_size = thread_stacks.SESSION_TURN_STACK_SIZE }, messageTaskWorker, .{task}) catch |err| {
@@ -1708,6 +1738,7 @@ pub fn runTelegramLoop(
                 msg.is_group,
                 reply_to_id,
                 msg.id,
+                msg.replace_message,
             );
         }
 
@@ -1840,6 +1871,7 @@ pub fn runSignalLoop(
                 .account_id = sg_ptr.account_id,
                 .sender_number = if (msg.sender.len > 0 and msg.sender[0] == '+') msg.sender else null,
                 .sender_uuid = msg.sender_uuid,
+                .delivery_chat_id = msg.reply_target orelse msg.sender,
                 .peer_id = if (msg.is_group) msg.group_id else msg.sender,
                 .group_id = msg.group_id,
                 .is_group = msg.is_group,
@@ -2077,6 +2109,7 @@ pub fn runMatrixLoop(
             const conversation_context = buildConversationContext(.{
                 .channel = "matrix",
                 .account_id = mx_ptr.account_id,
+                .delivery_chat_id = typing_target,
                 .peer_id = if (msg.is_group) room_peer_id else msg.sender,
                 .is_group = msg.is_group,
                 .group_id = if (msg.is_group) room_peer_id else null,
@@ -2221,6 +2254,7 @@ pub fn runMaxLoop(
             const conversation_context = buildConversationContext(.{
                 .channel = "max",
                 .account_id = mx_ptr.account_id,
+                .delivery_chat_id = reply_target,
                 .peer_id = if (msg.is_group) reply_target else msg.sender,
                 .is_group = msg.is_group,
                 .group_id = if (msg.is_group) reply_target else null,

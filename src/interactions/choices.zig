@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_util = @import("../json_util.zig");
 
 pub const START_TAG = "<nc_choices>";
 pub const END_TAG = "</nc_choices>";
@@ -48,6 +49,52 @@ pub const ParsedAssistantChoices = struct {
         if (self.choices) |*choices| choices.deinit(allocator);
     }
 };
+
+fn validateRenderableOption(id: []const u8, label: []const u8, submit_text: []const u8) !void {
+    if (!isValidChoiceId(id)) return error.InvalidChoices;
+    if (label.len == 0 or label.len > MAX_LABEL_LEN) return error.InvalidChoices;
+    if (submit_text.len == 0 or submit_text.len > MAX_SUBMIT_TEXT_LEN) return error.InvalidChoices;
+}
+
+pub fn renderAssistantChoices(allocator: std.mem.Allocator, visible_text: []const u8, options_src: anytype) ![]u8 {
+    const options = switch (@typeInfo(@TypeOf(options_src))) {
+        .pointer => |ptr| switch (ptr.size) {
+            .slice => options_src,
+            .one => switch (@typeInfo(ptr.child)) {
+                .array => options_src[0..],
+                else => @compileError("options_src must be a slice or pointer to array"),
+            },
+            else => @compileError("options_src must be a slice or pointer to array"),
+        },
+        else => @compileError("options_src must be a slice or pointer to array"),
+    };
+
+    if (options.len < MIN_OPTIONS or options.len > MAX_OPTIONS) return error.InvalidChoices;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, visible_text);
+    if (visible_text.len > 0 and visible_text[visible_text.len - 1] != '\n') {
+        try out.appendSlice(allocator, "\n\n");
+    }
+    try out.appendSlice(allocator, START_TAG);
+    try out.appendSlice(allocator, "{\"v\":1,\"options\":[");
+    for (options, 0..) |option, idx| {
+        try validateRenderableOption(option.id, option.label, option.submit_text);
+        if (idx > 0) try out.append(allocator, ',');
+        try out.appendSlice(allocator, "{\"id\":");
+        try json_util.appendJsonString(&out, allocator, option.id);
+        try out.appendSlice(allocator, ",\"label\":");
+        try json_util.appendJsonString(&out, allocator, option.label);
+        try out.appendSlice(allocator, ",\"submit_text\":");
+        try json_util.appendJsonString(&out, allocator, option.submit_text);
+        try out.append(allocator, '}');
+    }
+    try out.appendSlice(allocator, "]}");
+    try out.appendSlice(allocator, END_TAG);
+    return try out.toOwnedSlice(allocator);
+}
 
 const ChoicesBlockSpan = struct {
     open_start: usize,
@@ -392,6 +439,30 @@ test "choices parse rejects invalid id chars" {
     );
     defer parsed.deinit(allocator);
     try std.testing.expect(parsed.choices == null);
+}
+
+test "choices render helper round-trips through parser" {
+    const allocator = std.testing.allocator;
+    const options = [_]struct {
+        id: []const u8,
+        label: []const u8,
+        submit_text: []const u8,
+    }{
+        .{ .id = "one", .label = "One", .submit_text = "/model alpha" },
+        .{ .id = "two", .label = "Two", .submit_text = "/model beta" },
+    };
+
+    const rendered = try renderAssistantChoices(allocator, "Pick a model.", &options);
+    defer allocator.free(rendered);
+
+    var parsed = try parseAssistantChoices(allocator, rendered);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expect(parsed.choices != null);
+    try std.testing.expectEqualStrings("Pick a model.\n\n", parsed.visible_text);
+    try std.testing.expectEqual(@as(usize, 2), parsed.choices.?.options.len);
+    try std.testing.expectEqualStrings("/model alpha", parsed.choices.?.options[0].submit_text);
+    try std.testing.expectEqualStrings("/model beta", parsed.choices.?.options[1].submit_text);
 }
 
 test "choices callback data roundtrip" {
