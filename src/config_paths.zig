@@ -38,7 +38,7 @@ pub fn pathFromConfigDir(
     return std.fs.path.join(allocator, &.{ config_dir, leaf_name });
 }
 
-fn defaultWorkspaceDirFromInputs(
+pub fn defaultWorkspaceDirFromInputs(
     allocator: std.mem.Allocator,
     nullclaw_workspace: ?[]const u8,
     config_dir: []const u8,
@@ -55,9 +55,7 @@ pub fn defaultWorkspaceDirFromConfigDir(
 }
 
 pub fn defaultWorkspaceDir(allocator: std.mem.Allocator) ![]u8 {
-    if (try getEnvVarOwnedOrNull(allocator, "NULLCLAW_WORKSPACE")) |workspace_dir| {
-        return workspace_dir;
-    }
+    if (try getEnvVarOwnedOrNull(allocator, "NULLCLAW_WORKSPACE")) |workspace_dir| return workspace_dir;
 
     const config_dir = try defaultConfigDir(allocator);
     defer allocator.free(config_dir);
@@ -96,18 +94,18 @@ test "pathFromConfigDir appends a leaf name" {
 }
 
 test "defaultWorkspaceDirFromInputs prefers NULLCLAW_WORKSPACE override" {
-    const path = try defaultWorkspaceDirFromInputs(std.testing.allocator, "/tmp/nullclaw-workspace", "/tmp/nullclaw-home");
-    defer std.testing.allocator.free(path);
+    const workspace_dir = try defaultWorkspaceDirFromInputs(std.testing.allocator, "/tmp/custom-workspace", "/tmp/nullclaw-home");
+    defer std.testing.allocator.free(workspace_dir);
 
-    try std.testing.expectEqualStrings("/tmp/nullclaw-workspace", path);
+    try std.testing.expectEqualStrings("/tmp/custom-workspace", workspace_dir);
 }
 
 test "defaultWorkspaceDirFromConfigDir appends workspace" {
-    const path = try defaultWorkspaceDirFromConfigDir(std.testing.allocator, "/tmp/nullclaw-home");
-    defer std.testing.allocator.free(path);
+    const workspace_dir = try defaultWorkspaceDirFromConfigDir(std.testing.allocator, "/tmp/nullclaw-home");
+    defer std.testing.allocator.free(workspace_dir);
 
     const expected = try std.fs.path.join(std.testing.allocator, &.{ "/tmp/nullclaw-home", "workspace" });
     defer std.testing.allocator.free(expected);
 
-    try std.testing.expectEqualStrings(expected, path);
+    try std.testing.expectEqualStrings(expected, workspace_dir);
 }

@@ -2383,7 +2383,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     }
 
     // ── Step 8: Workspace path ──
-    const default_workspace = try getDefaultWorkspace(allocator);
+    const default_workspace = cfg.workspace_dir;
     try out.print("  Step 8/8: Workspace path [{s}]: ", .{default_workspace});
     const ws_input = prompt(out, &input_buf, "", default_workspace) orelse {
         try out.writeAll("\n  Aborted.\n");
@@ -3160,14 +3160,57 @@ fn getDefaultWorkspace(allocator: std.mem.Allocator) ![]const u8 {
 fn getDefaultConfigPath(allocator: std.mem.Allocator) ![]const u8 {
     const config_dir = try config_paths.defaultConfigDir(allocator);
     defer allocator.free(config_dir);
-    return defaultConfigPathFromDir(allocator, config_dir);
-}
-
-fn defaultConfigPathFromDir(allocator: std.mem.Allocator, config_dir: []const u8) ![]const u8 {
     return config_paths.pathFromConfigDir(allocator, config_dir, "config.json");
 }
 
 // ── Tests ────────────────────────────────────────────────────────
+
+test "getDefaultWorkspace prefers NULLCLAW_WORKSPACE override" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const c = @cImport({
+        @cInclude("stdlib.h");
+    });
+
+    const key_z = try std.testing.allocator.dupeZ(u8, "NULLCLAW_WORKSPACE");
+    defer std.testing.allocator.free(key_z);
+    const value_z = try std.testing.allocator.dupeZ(u8, "/tmp/nullclaw-test-workspace");
+    defer std.testing.allocator.free(value_z);
+
+    try std.testing.expectEqual(@as(c_int, 0), c.setenv(key_z.ptr, value_z.ptr, 1));
+    defer _ = c.unsetenv(key_z.ptr);
+
+    const workspace = try getDefaultWorkspace(std.testing.allocator);
+    defer std.testing.allocator.free(workspace);
+
+    try std.testing.expectEqualStrings("/tmp/nullclaw-test-workspace", workspace);
+}
+
+test "initFreshConfig honors NULLCLAW_HOME and NULLCLAW_WORKSPACE overrides" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const c = @cImport({
+        @cInclude("stdlib.h");
+    });
+
+    const home_key_z = try std.testing.allocator.dupeZ(u8, "NULLCLAW_HOME");
+    defer std.testing.allocator.free(home_key_z);
+    const home_value_z = try std.testing.allocator.dupeZ(u8, "/tmp/nullclaw-home");
+    defer std.testing.allocator.free(home_value_z);
+    try std.testing.expectEqual(@as(c_int, 0), c.setenv(home_key_z.ptr, home_value_z.ptr, 1));
+    defer _ = c.unsetenv(home_key_z.ptr);
+
+    const workspace_key_z = try std.testing.allocator.dupeZ(u8, "NULLCLAW_WORKSPACE");
+    defer std.testing.allocator.free(workspace_key_z);
+    const workspace_value_z = try std.testing.allocator.dupeZ(u8, "/tmp/nullclaw-home/workspace-custom");
+    defer std.testing.allocator.free(workspace_value_z);
+    try std.testing.expectEqual(@as(c_int, 0), c.setenv(workspace_key_z.ptr, workspace_value_z.ptr, 1));
+    defer _ = c.unsetenv(workspace_key_z.ptr);
+
+    var cfg = try initFreshConfig(std.testing.allocator);
+    defer cfg.deinit();
+
+    try std.testing.expectEqualStrings("/tmp/nullclaw-home/workspace-custom", cfg.workspace_dir);
+    try std.testing.expectEqualStrings("/tmp/nullclaw-home/config.json", cfg.config_path);
+}
 
 test "canonicalProviderName handles aliases" {
     try std.testing.expectEqualStrings("xai", canonicalProviderName("grok"));
@@ -3294,16 +3337,6 @@ test "isWizardInteractiveChannel includes supported onboarding channels" {
     try std.testing.expect(isWizardInteractiveChannel(.nostr));
     try std.testing.expect(isWizardInteractiveChannel(.max));
     try std.testing.expect(!isWizardInteractiveChannel(.whatsapp));
-}
-
-test "defaultConfigPathFromDir appends config.json" {
-    const path = try defaultConfigPathFromDir(std.testing.allocator, "/tmp/nullclaw-home");
-    defer std.testing.allocator.free(path);
-
-    const expected = try std.fs.path.join(std.testing.allocator, &.{ "/tmp/nullclaw-home", "config.json" });
-    defer std.testing.allocator.free(expected);
-
-    try std.testing.expectEqualStrings(expected, path);
 }
 
 test "parseWizardJsonConfig normalizes valid object payload" {
@@ -4129,74 +4162,6 @@ test "providerEnvVar groq" {
     try std.testing.expectEqualStrings("GROQ_API_KEY", providerEnvVar("groq"));
 }
 
-fn getTestEnvVarOwnedOrNull(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
-    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => return err,
-    };
-}
-
-fn setTestEnvVar(name: []const u8, value: []const u8) !void {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const c = @cImport({
-        @cInclude("stdlib.h");
-    });
-
-    const name_z = try std.testing.allocator.dupeZ(u8, name);
-    defer std.testing.allocator.free(name_z);
-    const value_z = try std.testing.allocator.dupeZ(u8, value);
-    defer std.testing.allocator.free(value_z);
-
-    try std.testing.expectEqual(@as(c_int, 0), c.setenv(name_z.ptr, value_z.ptr, 1));
-}
-
-fn unsetTestEnvVar(name: []const u8) !void {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const c = @cImport({
-        @cInclude("stdlib.h");
-    });
-
-    const name_z = try std.testing.allocator.dupeZ(u8, name);
-    defer std.testing.allocator.free(name_z);
-
-    try std.testing.expectEqual(@as(c_int, 0), c.unsetenv(name_z.ptr));
-}
-
-fn restoreTestEnvVar(name: []const u8, previous: ?[]u8) void {
-    if (builtin.os.tag == .windows) return;
-
-    if (previous) |value| {
-        setTestEnvVar(name, value) catch unreachable;
-        std.testing.allocator.free(value);
-        return;
-    }
-
-    unsetTestEnvVar(name) catch unreachable;
-}
-
-test "initFreshConfig honors nullclaw env overrides" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const allocator = std.testing.allocator;
-    const prev_home = try getTestEnvVarOwnedOrNull(allocator, "NULLCLAW_HOME");
-    defer restoreTestEnvVar("NULLCLAW_HOME", prev_home);
-    const prev_workspace = try getTestEnvVarOwnedOrNull(allocator, "NULLCLAW_WORKSPACE");
-    defer restoreTestEnvVar("NULLCLAW_WORKSPACE", prev_workspace);
-
-    // Regression: #747 — Docker onboarding relies on these env vars so the
-    // fresh config fallback must not drift back to config-dir/workspace defaults.
-    try setTestEnvVar("NULLCLAW_HOME", "/tmp/nullclaw-container-home");
-    try setTestEnvVar("NULLCLAW_WORKSPACE", "/tmp/nullclaw-container-workspace");
-
-    var cfg = try initFreshConfig(allocator);
-    defer cfg.deinit();
-
-    try std.testing.expectEqualStrings("/tmp/nullclaw-container-home/config.json", cfg.config_path);
-    try std.testing.expectEqualStrings("/tmp/nullclaw-container-workspace", cfg.workspace_dir);
-}
-
 test "known_providers all have non-empty fields" {
     for (known_providers) |p| {
         try std.testing.expect(p.key.len > 0);
@@ -4857,6 +4822,38 @@ test "CACHE_TTL_SECS is 12 hours" {
 }
 
 test "fetchModels returns models for anthropic (no network)" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const c = @cImport({
+        @cInclude("stdlib.h");
+    });
+
+    const env_name = try std.testing.allocator.dupeZ(u8, "NULLCLAW_HOME");
+    defer std.testing.allocator.free(env_name);
+    const previous_home = std.process.getEnvVarOwned(std.testing.allocator, "NULLCLAW_HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer {
+        if (previous_home) |value| {
+            defer std.testing.allocator.free(value);
+            const value_z = std.testing.allocator.dupeZ(u8, value) catch unreachable;
+            defer std.testing.allocator.free(value_z);
+            _ = c.setenv(env_name.ptr, value_z.ptr, 1);
+        } else {
+            _ = c.unsetenv(env_name.ptr);
+        }
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+    const test_home = try std.fs.path.join(std.testing.allocator, &.{ base, "nullclaw-home" });
+    defer std.testing.allocator.free(test_home);
+    const test_home_z = try std.testing.allocator.dupeZ(u8, test_home);
+    defer std.testing.allocator.free(test_home_z);
+    try std.testing.expectEqual(@as(c_int, 0), c.setenv(env_name.ptr, test_home_z.ptr, 1));
+
     const models = try fetchModels(std.testing.allocator, "anthropic", null);
     // Anthropic uses hardcoded fallback (allocated copies via fetchModelsFromApi)
     defer {
