@@ -419,13 +419,10 @@ fn runDoctorCommand(allocator: std.mem.Allocator, sub_args: []const []const u8) 
         return;
     }
     if (sub_args.len == 1 and std.mem.eql(u8, sub_args[0], "--json")) {
-        const json = yc.status.buildRuntimeStatusJson(allocator) catch |err| {
+        yc.doctor.runJson(allocator) catch |err| {
             writeJsonError("doctor_failed", @errorName(err), null);
             std_compat.process.exit(1);
         };
-        defer allocator.free(json);
-        printStdoutBytes(json);
-        printStdoutBytes("\n");
         return;
     }
 
@@ -619,7 +616,10 @@ fn runAgentInvokeJson(allocator: std.mem.Allocator, sub_args: []const []const u8
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    if (switch (result.term) { .exited => |code| code == 0, else => false }) {
+    if (switch (result.term) {
+        .exited => |code| code == 0,
+        else => false,
+    }) {
         var ctx = HistoryStoreContext.init(allocator) catch |err| switch (err) {
             error.ConfigNotFound => {
                 writeJsonError("config_not_found", "No config found -- run `nullclaw onboard` first", null);

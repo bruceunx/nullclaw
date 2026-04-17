@@ -6,7 +6,7 @@
 //!   - Body size limits (configurable, default 64KB)
 //!   - Request timeouts (configurable, default 30s)
 //!   - Bearer token authentication (PairingGuard)
-//!   - Endpoints: /health, /ready, /status, /pair, /logout, /webhook, /a2a, /.well-known/agent-card.json, /whatsapp, /telegram, /line, /lark, /wechat, /wecom, /qq, /max, /slack/events, /api/messages (Teams)
+//!   - Endpoints: /health, /ready, /status, /doctor, /pair, /logout, /webhook, /a2a, /.well-known/agent-card.json, /whatsapp, /telegram, /line, /lark, /wechat, /wecom, /qq, /max, /slack/events, /api/messages (Teams)
 //!
 //! Uses std.http.Server (built-in, no external deps).
 
@@ -15,6 +15,7 @@ const std_compat = @import("compat");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const daemon = @import("daemon.zig");
+const doctor_mod = @import("doctor.zig");
 const health = @import("health.zig");
 const status_mod = @import("status.zig");
 const Config = @import("config.zig").Config;
@@ -4958,7 +4959,7 @@ pub fn clearSharedScheduler() void {
 }
 
 /// Run the HTTP gateway. Binds to host:port and serves HTTP requests.
-/// Endpoints: GET /health, GET /ready, GET /status, POST /pair, POST /logout, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, GET|POST /wechat, GET|POST /wecom, POST /qq, POST /max
+/// Endpoints: GET /health, GET /ready, GET /status, GET /doctor, POST /pair, POST /logout, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, GET|POST /wechat, GET|POST /wecom, POST /qq, POST /max
 /// If config_ptr is null, loads config internally (for backward compatibility).
 pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr: ?*const Config, event_bus: ?*bus_mod.Bus) !void {
     health.markComponentOk("gateway");
@@ -5250,11 +5251,12 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
         const target = parts.next() orelse continue;
 
         // Simple routing — control endpoints + descriptor-driven channel webhooks.
-        const ControlRoute = enum { health, ready, status, webhook, pair, logout };
+        const ControlRoute = enum { health, ready, status, doctor, webhook, pair, logout };
         const control_route_map = std.StaticStringMap(ControlRoute).initComptime(.{
             .{ "/health", .health },
             .{ "/ready", .ready },
             .{ "/status", .status },
+            .{ "/doctor", .doctor },
             .{ "/webhook", .webhook },
             .{ "/pair", .pair },
             .{ "/logout", .logout },
@@ -5425,6 +5427,21 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                 response_body = status_mod.buildRuntimeStatusJson(req_allocator) catch {
                     response_status = "500 Internal Server Error";
                     response_body = "{\"error\":\"status_unavailable\"}";
+                    continue;
+                };
+            },
+            .doctor => {
+                const auth_header = extractHeader(raw, "Authorization");
+                const bearer = if (auth_header) |ah| extractBearerToken(ah) else null;
+                const pairing_guard = if (state.pairing_guard) |*guard| guard else null;
+                if (!isAdminRouteAuthorized(pairing_guard, bearer)) {
+                    response_status = "401 Unauthorized";
+                    response_body = "{\"error\":\"unauthorized\"}";
+                    continue;
+                }
+                response_body = doctor_mod.buildDoctorJson(req_allocator) catch {
+                    response_status = "500 Internal Server Error";
+                    response_body = "{\"error\":\"doctor_unavailable\"}";
                     continue;
                 };
             },
