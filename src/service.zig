@@ -915,12 +915,20 @@ fn shellDoubleQuoted(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+fn joinPosixPath(allocator: std.mem.Allocator, dir_path: []const u8, leaf: []const u8) ![]u8 {
+    if (dir_path.len == 0) return allocator.dupe(u8, leaf);
+    if (std.mem.endsWith(u8, dir_path, "/")) {
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ dir_path, leaf });
+    }
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, leaf });
+}
+
 fn serviceLauncherPath(allocator: std.mem.Allocator, config_dir: []const u8) ![]const u8 {
-    return std_compat.fs.path.join(allocator, &.{ config_dir, SERVICE_LAUNCHER_NAME });
+    return joinPosixPath(allocator, config_dir, SERVICE_LAUNCHER_NAME);
 }
 
 fn serviceEnvHelperPath(allocator: std.mem.Allocator, config_dir: []const u8) ![]const u8 {
-    return std_compat.fs.path.join(allocator, &.{ config_dir, SERVICE_ENV_HELPER_NAME });
+    return joinPosixPath(allocator, config_dir, SERVICE_ENV_HELPER_NAME);
 }
 
 fn buildServiceLauncherScript(allocator: std.mem.Allocator, service_exe_path: []const u8, config_dir: []const u8) ![]u8 {
@@ -1561,6 +1569,18 @@ test "buildServiceLauncherScript prefers optional service-env helper" {
     try std.testing.expect(std.mem.indexOf(u8, script, "export NULLCLAW_HOME=\"/home/alice/.nullclaw\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "exec \"/home/alice/.nullclaw/service-env\" \"/usr/local/bin/nullclaw\" gateway") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "exec \"/usr/local/bin/nullclaw\" gateway") != null);
+}
+
+test "service launcher helper paths use POSIX separators" {
+    const launcher_path = try serviceLauncherPath(std.testing.allocator, "/home/alice/.nullclaw");
+    defer std.testing.allocator.free(launcher_path);
+    try std.testing.expectEqualStrings("/home/alice/.nullclaw/service-launch.sh", launcher_path);
+
+    const helper_path = try serviceEnvHelperPath(std.testing.allocator, "/home/alice/.nullclaw");
+    defer std.testing.allocator.free(helper_path);
+    // Regression: service launcher scripts are POSIX shell, so helper paths must
+    // stay slash-delimited even when tests execute on Windows hosts.
+    try std.testing.expectEqualStrings("/home/alice/.nullclaw/service-env", helper_path);
 }
 
 test "buildOpenRcScript includes user and config env" {

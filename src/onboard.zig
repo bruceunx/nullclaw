@@ -219,6 +219,7 @@ fn printProviderNextSteps(
         try out.writeAll("    2. Interactive chat:  nullclaw agent\n");
         try out.writeAll("       Then type:         Hello!\n");
         try out.writeAll("    3. Gateway:           nullclaw gateway\n");
+        try printOpenRouterFreeTierHint(out, canonical);
         return;
     }
 
@@ -252,6 +253,12 @@ fn printProviderNextSteps(
     try out.writeAll("       Then type:         Hello!\n");
     try out.writeAll("    2. Gateway:           nullclaw gateway\n");
     try out.writeAll("    3. Status:            nullclaw status\n");
+    try printOpenRouterFreeTierHint(out, canonical);
+}
+
+fn printOpenRouterFreeTierHint(out: *std.Io.Writer, canonical_provider: []const u8) !void {
+    if (!std.mem.eql(u8, canonical_provider, "openrouter")) return;
+    try out.writeAll("       Note: free-tier OpenRouter keys may need a `:free` model; paid defaults can return rate-limit errors.\n");
 }
 
 /// Resolve a provider name used in quick setup.
@@ -4170,6 +4177,17 @@ test "printProviderNextSteps includes env hint before interactive chat" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "nullclaw agent -m") == null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Interactive chat:  nullclaw agent") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Gateway:           nullclaw gateway") != null);
+}
+
+test "printProviderNextSteps warns about OpenRouter free-tier defaults" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try printProviderNextSteps(&aw.writer, "openrouter", "OPENROUTER_API_KEY", true, true);
+
+    const rendered = aw.writer.buffer[0..aw.writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "`:free` model") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "rate-limit errors") != null);
 }
 
 test "printProviderNextSteps keeps openai-codex auth flow and interactive chat" {
