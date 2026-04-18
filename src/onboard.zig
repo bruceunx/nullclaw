@@ -2423,7 +2423,21 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try scaffoldWorkspaceForConfig(allocator, &cfg, &ProjectContext{});
 
     // Save config
-    try cfg.save();
+    cfg.save() catch |err| {
+        if (err == error.KeyWriteFailed) {
+            try out.print(
+                "\n  Error: could not write encryption key to {s}.\n" ++
+                    "  This usually means the config directory is not writable by the current user.\n" ++
+                    "  In Docker: run `docker compose run --rm --user root agent chown -R 65534:65534 /nullclaw-data`\n" ++
+                    "  then retry onboard. Alternatively, set `\"secrets\": {{\"encrypt\": false}}` in config.json\n" ++
+                    "  to disable at-rest encryption (not recommended for production).\n",
+                .{std_compat.fs.path.dirname(cfg.config_path) orelse cfg.config_path},
+            );
+            try out.flush();
+            return;
+        }
+        return err;
+    };
 
     // Print summary
     try out.writeAll("  ── Configuration complete ──\n\n");
