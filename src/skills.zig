@@ -739,12 +739,37 @@ pub fn listSkills(allocator: std.mem.Allocator, workspace_dir: []const u8, obser
         if (loadSkill(allocator, sub_path, observer)) |skill| {
             try skills_list.append(allocator, skill);
         } else |_| {
-            // Skip directories without valid skill.json
-            continue;
+            // No valid manifest — treat as a category directory and scan one level deeper.
+            try scanCategoryDir(allocator, sub_path, observer, &skills_list);
         }
     }
 
     return try skills_list.toOwnedSlice(allocator);
+}
+
+/// Scans one level inside a category directory for skill subdirectories.
+/// Directories without a valid manifest are silently skipped.
+fn scanCategoryDir(
+    allocator: std.mem.Allocator,
+    category_path: []const u8,
+    observer: ?observability.Observer,
+    skills_list: *std.ArrayList(Skill),
+) !void {
+    const cat_dir = fs_compat.openDirPath(category_path, .{ .iterate = true }) catch return;
+    var cat_dir_mut = cat_dir;
+    defer cat_dir_mut.close();
+
+    var cat_it = cat_dir_mut.iterate();
+    while (try cat_it.next()) |entry| {
+        if (entry.kind != .directory) continue;
+
+        const nested_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ category_path, entry.name });
+        defer allocator.free(nested_path);
+
+        if (loadSkill(allocator, nested_path, observer)) |skill| {
+            try skills_list.append(allocator, skill);
+        } else |_| {}
+    }
 }
 
 /// Load skills from two sources: built-in and workspace.
@@ -2818,6 +2843,81 @@ test "listSkills discovers skills in subdirectories" {
     }
     try std.testing.expect(found_alpha);
     try std.testing.expect(found_beta);
+}
+
+test "listSkills discovers skills nested inside a category directory" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // skills/coding/git-helpers/ — nested skill
+    try @import("compat").fs.Dir.wrap(tmp.dir).makePath("skills/coding/git-helpers");
+    {
+        const f = try @import("compat").fs.Dir.wrap(tmp.dir).createFile("skills/coding/git-helpers/skill.json", .{});
+        defer f.close();
+        try f.writeAll("{\"name\": \"git-helpers\", \"version\": \"1.0.0\", \"description\": \"Git utilities\", \"author\": \"dev\"}");
+    }
+
+    // skills/coding/docker-ops/ — another nested skill in the same category
+    try @import("compat").fs.Dir.wrap(tmp.dir).makePath("skills/coding/docker-ops");
+    {
+        const f = try @import("compat").fs.Dir.wrap(tmp.dir).createFile("skills/coding/docker-ops/skill.json", .{});
+        defer f.close();
+        try f.writeAll("{\"name\": \"docker-ops\", \"version\": \"1.0.0\", \"description\": \"Docker tools\", \"author\": \"dev\"}");
+    }
+
+    // skills/flat-skill/ — flat skill still works alongside categories
+    try @import("compat").fs.Dir.wrap(tmp.dir).makePath("skills/flat-skill");
+    {
+        const f = try @import("compat").fs.Dir.wrap(tmp.dir).createFile("skills/flat-skill/skill.json", .{});
+        defer f.close();
+        try f.writeAll("{\"name\": \"flat-skill\", \"version\": \"1.0.0\", \"description\": \"Top-level skill\", \"author\": \"dev\"}");
+    }
+
+    const base = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
+    const skills = try listSkills(allocator, base, null);
+    defer freeSkills(allocator, skills);
+
+    try std.testing.expectEqual(@as(usize, 3), skills.len);
+
+    var found_git = false;
+    var found_docker = false;
+    var found_flat = false;
+    for (skills) |s| {
+        if (std.mem.eql(u8, s.name, "git-helpers")) found_git = true;
+        if (std.mem.eql(u8, s.name, "docker-ops")) found_docker = true;
+        if (std.mem.eql(u8, s.name, "flat-skill")) found_flat = true;
+    }
+    try std.testing.expect(found_git);
+    try std.testing.expect(found_docker);
+    try std.testing.expect(found_flat);
+}
+
+test "listSkills skips category directory itself when it has no manifest" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // skills/tools/ — category dir with no manifest of its own
+    // skills/tools/web-search/ — valid nested skill
+    try @import("compat").fs.Dir.wrap(tmp.dir).makePath("skills/tools/web-search");
+    {
+        const f = try @import("compat").fs.Dir.wrap(tmp.dir).createFile("skills/tools/web-search/skill.json", .{});
+        defer f.close();
+        try f.writeAll("{\"name\": \"web-search\", \"version\": \"1.0.0\", \"description\": \"Search the web\", \"author\": \"dev\"}");
+    }
+
+    const base = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
+    const skills = try listSkills(allocator, base, null);
+    defer freeSkills(allocator, skills);
+
+    // Only the nested skill is loaded — not the category dir itself
+    try std.testing.expectEqual(@as(usize, 1), skills.len);
+    try std.testing.expectEqualStrings("web-search", skills[0].name);
 }
 
 test "listSkills discovers markdown-only skill directories" {
