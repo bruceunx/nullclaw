@@ -931,10 +931,22 @@ fn buildOpenRcScript(allocator: std.mem.Allocator, cfg: OpenRcScriptConfig) ![]u
         \\export HOME={s}
         \\export NULLCLAW_HOME={s}
         \\{s}
+        \\respawn
+        \\respawn_delay=3
+        \\
         \\depend() {{
         \\    need net
         \\}}
-    , .{ cfg.openrc_run_path, exe_quoted, home_quoted, home_quoted, config_quoted, user_line });
+        \\
+        \\start_pre() {{
+        \\    local envfile={s}/.env
+        \\    if [ -f "$envfile" ]; then
+        \\        set -a
+        \\        . "$envfile"
+        \\        set +a
+        \\    fi
+        \\}}
+    , .{ cfg.openrc_run_path, exe_quoted, home_quoted, home_quoted, config_quoted, user_line, config_quoted });
 }
 
 fn buildSysvinitScript(allocator: std.mem.Allocator, cfg: SysvinitScriptConfig) ![]u8 {
@@ -990,6 +1002,11 @@ fn buildSysvinitScript(allocator: std.mem.Allocator, cfg: SysvinitScriptConfig) 
         \\case "$1" in
         \\  start)
         \\    echo "Starting nullclaw..."
+        \\    # Wait up to 60s for HTTPS to work (covers network, DNS, NTP/clock).
+        \\    i=0; while [ "$i" -lt 30 ]; do
+        \\        curl -sfo /dev/null --max-time 2 https://openrouter.ai >/dev/null 2>&1 && break
+        \\        sleep 2; i=$((i + 1))
+        \\    done
         \\    export HOME="$SERVICE_HOME"
         \\    export NULLCLAW_HOME="$NULLCLAW_HOME"
         \\{s}
@@ -1515,6 +1532,10 @@ test "buildOpenRcScript includes user and config env" {
     try std.testing.expect(std.mem.indexOf(u8, script, "command_user=\"alice\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "export HOME=\"/home/alice\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "export NULLCLAW_HOME=\"/home/alice/.nullclaw\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "respawn") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "respawn_delay=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "start_pre()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, ".nullclaw\"/.env") != null);
 }
 
 test "buildSysvinitScript includes user and config env" {
@@ -1535,10 +1556,9 @@ test "buildSysvinitScript includes user and config env" {
     try std.testing.expect(std.mem.indexOf(u8, script, "--startas /bin/sh -- -c") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "$DAEMON") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "$LOGFILE") != null);
-    // Parity: EnvironmentFile sourcing (matches systemd EnvironmentFile=-.../.env)
     try std.testing.expect(std.mem.indexOf(u8, script, "ENVFILE=\"$NULLCLAW_HOME/.env\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, script, ". \"$ENVFILE\"") != null);
-    // Parity: auto-restart on crash (matches systemd Restart=always + RestartSec=3)
+    try std.testing.expect(std.mem.indexOf(u8, script, ". \\\\\"$ENVFILE\\\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "curl -sfo /dev/null --max-time 2 https://openrouter.ai") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "RESPAWN_DELAY=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "while true; do") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "sleep $RESPAWN_DELAY") != null);
