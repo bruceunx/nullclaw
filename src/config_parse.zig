@@ -33,8 +33,6 @@ fn parseToolCustomizationArray(allocator: std.mem.Allocator, arr: std.json.Array
         for (list.items) |item| {
             allocator.free(item.name);
             if (item.system_prompt) |p| allocator.free(p);
-            for (item.triggers) |t| allocator.free(t);
-            allocator.free(item.triggers);
         }
         list.deinit(allocator);
     }
@@ -48,21 +46,21 @@ fn parseToolCustomizationArray(allocator: std.mem.Allocator, arr: std.json.Array
         var cust = types.ToolCustomization{
             .name = try allocator.dupe(u8, name_val.string),
         };
+        var cust_owned = true;
+        errdefer if (cust_owned) {
+            allocator.free(cust.name);
+            if (cust.system_prompt) |p| allocator.free(p);
+        };
 
         if (item.object.get("system_prompt")) |v| {
             if (v == .string) cust.system_prompt = try allocator.dupe(u8, v.string);
-        }
-        if (item.object.get("triggers")) |v| {
-            if (v == .array) cust.triggers = try parseStringArray(allocator, v.array);
-        }
-        if (item.object.get("priority")) |v| {
-            if (v == .integer) cust.priority = @intCast(std.math.clamp(v.integer, 0, 255));
         }
         if (item.object.get("enabled")) |v| {
             if (v == .bool) cust.enabled = v.bool;
         }
 
         try list.append(allocator, cust);
+        cust_owned = false;
     }
     return try list.toOwnedSlice(allocator);
 }
@@ -1467,15 +1465,6 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             }
             if (tl.object.get("tool_customizations")) |v| {
                 if (v == .array) self.tools.tool_customizations = try parseToolCustomizationArray(self.allocator, v.array);
-            }
-            if (tl.object.get("tool_customizations_file")) |v| {
-                if (v == .string) self.tools.tool_customizations_file = try self.allocator.dupe(u8, v.string);
-            }
-            if (tl.object.get("trigger_modifiers")) |v| {
-                if (v == .array) self.tools.trigger_modifiers = try parseStringArray(self.allocator, v.array);
-            }
-            if (tl.object.get("trigger_punctuation")) |v| {
-                if (v == .string) self.tools.trigger_punctuation = try self.allocator.dupe(u8, v.string);
             }
             // tools.media.audio → self.audio_media
             if (tl.object.get("media")) |media| {

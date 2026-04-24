@@ -134,6 +134,7 @@ pub const DelegateAgentConfig = config_types.DelegateAgentConfig;
 pub const NamedAgentConfig = config_types.NamedAgentConfig;
 pub const McpServerConfig = config_types.McpServerConfig;
 pub const ModelPricing = config_types.ModelPricing;
+pub const ToolCustomization = config_types.ToolCustomization;
 pub const ToolsConfig = config_types.ToolsConfig;
 pub const ProviderEntry = config_types.ProviderEntry;
 pub const AudioMediaConfig = config_types.AudioMediaConfig;
@@ -1373,6 +1374,10 @@ pub const Config = struct {
         try w.print("    \"web_fetch_max_chars\": {d},\n", .{self.tools.web_fetch_max_chars});
         try w.print("    \"path_env_vars\": ", .{});
         try writePrettyJsonInline(self.allocator, w, self.tools.path_env_vars, "    ");
+        if (self.tools.tool_customizations.len > 0) {
+            try w.print(",\n    \"tool_customizations\": ", .{});
+            try writePrettyJsonInline(self.allocator, w, self.tools.tool_customizations, "    ");
+        }
         // tools.media.audio
         {
             const am = self.audio_media;
@@ -3911,6 +3916,28 @@ test "json parse tools.path_env_vars" {
     allocator.free(cfg.tools.path_env_vars);
 }
 
+test "json parse tools.tool_customizations" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const json =
+        \\{"tools": {"tool_customizations": [
+        \\  {"name": "shell", "enabled": false},
+        \\  {"name": "file_read", "system_prompt": "Read only small files"}
+        \\]}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = arena.allocator() };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(@as(usize, 2), cfg.tools.tool_customizations.len);
+    try std.testing.expectEqualStrings("shell", cfg.tools.tool_customizations[0].name);
+    try std.testing.expect(!cfg.tools.tool_customizations[0].enabled);
+    try std.testing.expect(cfg.tools.tool_customizations[0].system_prompt == null);
+    try std.testing.expectEqualStrings("file_read", cfg.tools.tool_customizations[1].name);
+    try std.testing.expectEqualStrings("Read only small files", cfg.tools.tool_customizations[1].system_prompt.?);
+    try std.testing.expect(cfg.tools.tool_customizations[1].enabled);
+}
+
 test "save roundtrip preserves tools.path_env_vars" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -3945,6 +3972,49 @@ test "save roundtrip preserves tools.path_env_vars" {
     try std.testing.expectEqual(@as(usize, 2), loaded.tools.path_env_vars.len);
     try std.testing.expectEqualStrings("LD_LIBRARY_PATH", loaded.tools.path_env_vars[0]);
     try std.testing.expectEqualStrings("PYTHONHOME", loaded.tools.path_env_vars[1]);
+}
+
+test "save roundtrip preserves tools.tool_customizations" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+    defer allocator.free(config_path);
+
+    const customizations = [_]ToolCustomization{
+        .{ .name = "shell", .enabled = false },
+        .{ .name = "file_read", .system_prompt = "Read only small files" },
+    };
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.tools.tool_customizations = &customizations;
+    try cfg.save();
+
+    const file = try std_compat.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(content);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var loaded = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = arena.allocator(),
+    };
+    try loaded.parseJson(content);
+    try std.testing.expectEqual(@as(usize, 2), loaded.tools.tool_customizations.len);
+    try std.testing.expectEqualStrings("shell", loaded.tools.tool_customizations[0].name);
+    try std.testing.expect(!loaded.tools.tool_customizations[0].enabled);
+    try std.testing.expectEqualStrings("file_read", loaded.tools.tool_customizations[1].name);
+    try std.testing.expectEqualStrings("Read only small files", loaded.tools.tool_customizations[1].system_prompt.?);
 }
 
 test "json parse autonomy allow_raw_url_chars" {
