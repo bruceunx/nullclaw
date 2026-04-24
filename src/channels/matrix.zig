@@ -820,7 +820,7 @@ test "MatrixChannel initFromConfig falls back to homeserver when proxy is null" 
     try std.testing.expectEqualStrings("https://matrix.example", ch.effective_endpoint);
 }
 
-test "MatrixChannel buildSyncUrl uses effective_endpoint" {
+test "MatrixChannel URL builders use effective_endpoint" {
     var ch = MatrixChannel.initFromConfig(std.testing.allocator, .{
         .homeserver = "https://matrix.example/",
         .access_token = "tok",
@@ -829,8 +829,23 @@ test "MatrixChannel buildSyncUrl uses effective_endpoint" {
         .pantalaimon_proxy_url = "http://localhost:8008",
     });
     var buf: [512]u8 = undefined;
-    const url = try ch.buildSyncUrl(&buf);
-    try std.testing.expect(std.mem.startsWith(u8, url, "http://localhost:8008/_matrix/"));
+
+    // Regression: every Matrix Client-Server API URL must route through
+    // Pantalaimon when the proxy endpoint is configured.
+    const whoami_url = try ch.buildWhoAmIUrl(&buf);
+    try std.testing.expect(std.mem.startsWith(u8, whoami_url, "http://localhost:8008/_matrix/"));
+
+    const sync_url = try ch.buildSyncUrl(&buf);
+    try std.testing.expect(std.mem.startsWith(u8, sync_url, "http://localhost:8008/_matrix/"));
+
+    const send_url = try ch.buildSendUrl(&buf, "!room:example", "txn-1");
+    try std.testing.expect(std.mem.startsWith(u8, send_url, "http://localhost:8008/_matrix/"));
+
+    const typing_url = try ch.buildTypingUrl(&buf, "!room:example", "@bot:example");
+    try std.testing.expect(std.mem.startsWith(u8, typing_url, "http://localhost:8008/_matrix/"));
+
+    const join_url = try ch.buildJoinUrl(&buf, "!room:example");
+    try std.testing.expect(std.mem.startsWith(u8, join_url, "http://localhost:8008/_matrix/"));
 }
 
 test "MatrixChannel buildTypingUrl encodes room and user ids" {
