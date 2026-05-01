@@ -77,7 +77,7 @@ pub const ProgressSink = struct {
 
 /// Callback invoked at each tool-loop boundary to drain a pending mid-turn injection.
 /// Returns an owned slice allocated with the provided allocator, or null if empty.
-pub const DrainCallback = *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) ?[]u8;
+pub const DrainCallback = *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!?[]u8;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Agent
@@ -1981,7 +1981,7 @@ pub const Agent = struct {
             // Drain any mid-turn injection at each tool boundary.
             if (self.drain_injection_cb) |drain_cb| {
                 if (self.drain_injection_ctx) |drain_ctx| {
-                    if (drain_cb(drain_ctx, self.allocator)) |injected| {
+                    if (try drain_cb(drain_ctx, self.allocator)) |injected| {
                         try self.appendOwnedHistoryMessage(.{ .role = .user, .content = injected });
                     }
                 }

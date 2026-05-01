@@ -29,7 +29,6 @@ const thread_stacks = @import("thread_stacks.zig");
 const control_plane = @import("control_plane.zig");
 const agent_bindings_config = @import("agent_bindings_config.zig");
 const fs_compat = @import("fs_compat.zig");
-const inbound_router = @import("inbound_router.zig");
 const provider_probe = @import("provider_probe.zig");
 
 const signal = @import("channels/signal.zig");
@@ -774,6 +773,10 @@ fn handleTelegramInteractiveCallback(
             return false;
         }
 
+        if (runtime.session_mgr.routeInbound(session_key, content) == .skip) {
+            return true;
+        }
+
         const model_reply = runtime.session_mgr.processMessage(session_key, content, conversation_context) catch |err| {
             log.err("failed to process telegram callback interaction: {}", .{err});
             response_owned = true;
@@ -977,18 +980,7 @@ fn processTelegramMessage(
     };
     const sink = tg_ptr.makeSink(&stream_ctx);
 
-    switch (inbound_router.route(runtime.session_mgr.routeInput(session_key))) {
-        .inject, .replace_injection => {
-            runtime.session_mgr.injectMidTurn(session_key, content) catch |err|
-                log.warn("mid-turn inject failed session={s} err={}", .{ session_key, err });
-            return;
-        },
-        .drop => {
-            log.info("dropping message: session busy queue_mode=off session={s}", .{session_key});
-            return;
-        },
-        .process, .queue => {},
-    }
+    if (runtime.session_mgr.routeInbound(session_key, content) == .skip) return;
 
     tg_ptr.setTaskReaction(sender, message_id, .running);
     const reply = runtime.session_mgr.processMessageStreaming(session_key, content, conversation_context, sink, null) catch |err| {
@@ -1630,6 +1622,13 @@ pub fn runTelegramLoop(
                         break :parallel_attempt;
                     }
 
+                    if (active_worker_threads.get(session_key) != null and
+                        runtime.session_mgr.routeInbound(session_key, msg.content) == .skip)
+                    {
+                        handled_in_worker = true;
+                        break :parallel_attempt;
+                    }
+
                     // Preserve message order per session_key.
                     if (active_worker_threads.fetchRemove(session_key)) |entry| {
                         var idx: usize = 0;
@@ -1895,6 +1894,8 @@ pub fn runSignalLoop(
                 break :blk route.session_key;
             };
 
+            if (runtime.session_mgr.routeInbound(session_key, msg.content) == .skip) continue;
+
             const typing_target = msg.reply_target;
             if (typing_target) |target| sg_ptr.startTyping(target) catch {};
             defer if (typing_target) |target| sg_ptr.stopTyping(target) catch {};
@@ -2005,6 +2006,8 @@ pub fn runWeixinLoop(
                 routed_session_key = route.session_key;
                 break :blk route.session_key;
             };
+
+            if (runtime.session_mgr.routeInbound(session_key, msg.content) == .skip) continue;
 
             const conversation_context = buildConversationContext(.{
                 .channel = "weixin",
@@ -2259,6 +2262,8 @@ pub fn runMatrixLoop(
                 break :blk route.session_key;
             };
 
+            if (runtime.session_mgr.routeInbound(session_key, msg.content) == .skip) continue;
+
             const typing_target = msg.reply_target orelse msg.sender;
             mx_ptr.startTyping(typing_target) catch {};
             defer mx_ptr.stopTyping(typing_target) catch {};
@@ -2405,18 +2410,7 @@ pub fn runMaxLoop(
                 break :blk route.session_key;
             };
 
-            switch (inbound_router.route(runtime.session_mgr.routeInput(session_key))) {
-                .inject, .replace_injection => {
-                    runtime.session_mgr.injectMidTurn(session_key, msg.content) catch |err|
-                        log.warn("mid-turn inject failed session={s} err={}", .{ session_key, err });
-                    continue;
-                },
-                .drop => {
-                    log.info("dropping message: session busy queue_mode=off session={s}", .{session_key});
-                    continue;
-                },
-                .process, .queue => {},
-            }
+            if (runtime.session_mgr.routeInbound(session_key, msg.content) == .skip) continue;
 
             mx_ptr.startTyping(reply_target) catch {};
             defer mx_ptr.stopTyping(reply_target) catch {};

@@ -207,6 +207,19 @@ pub const Session = struct {
         defer self.injection_mu.unlock();
         return self.injection_pending != null;
     }
+
+    /// Drain and duplicate the pending injection into dst_allocator.
+    /// On allocation failure the pending message stays buffered for a later retry.
+    pub fn drainInjection(self: *Session, sm_allocator: Allocator, dst_allocator: Allocator) !?[]u8 {
+        self.injection_mu.lock();
+        defer self.injection_mu.unlock();
+
+        const pending = self.injection_pending orelse return null;
+        const duped = try dst_allocator.dupe(u8, pending);
+        sm_allocator.free(pending);
+        self.injection_pending = null;
+        return duped;
+    }
 };
 
 const AgentRuntime = struct {
@@ -1761,16 +1774,9 @@ pub const SessionManager = struct {
             session: *Session,
             sm_allocator: Allocator,
 
-            fn callback(ctx: *anyopaque, agent_alloc: std.mem.Allocator) ?[]u8 {
+            fn callback(ctx: *anyopaque, agent_alloc: std.mem.Allocator) !?[]u8 {
                 const dc: *@This() = @ptrCast(@alignCast(ctx));
-                dc.session.injection_mu.lock();
-                defer dc.session.injection_mu.unlock();
-                const pending = dc.session.injection_pending orelse return null;
-                defer {
-                    dc.sm_allocator.free(pending);
-                    dc.session.injection_pending = null;
-                }
-                return agent_alloc.dupe(u8, pending) catch null;
+                return dc.session.drainInjection(dc.sm_allocator, agent_alloc);
             }
         };
         var drain_ctx = DrainCtx{ .session = session, .sm_allocator = self.allocator };
@@ -1863,6 +1869,31 @@ pub const SessionManager = struct {
             break :blk self.sessions.get(session_key) orelse return;
         };
         try session.injectMidTurn(self.allocator, text);
+    }
+
+    pub const InboundRouteAction = enum {
+        process,
+        skip,
+    };
+
+    /// Apply inbound routing side effects for a message.
+    /// Returns .skip when the caller should not start a new turn.
+    pub fn routeInbound(self: *SessionManager, session_key: []const u8, content: []const u8) InboundRouteAction {
+        const session_hash = std.hash.Wyhash.hash(0, session_key);
+        return switch (inbound_router.route(self.routeInput(session_key))) {
+            .inject, .replace_injection => blk: {
+                self.injectMidTurn(session_key, content) catch |err| {
+                    log.warn("mid-turn inject failed session=0x{x} err={}", .{ session_hash, err });
+                    break :blk .process;
+                };
+                break :blk .skip;
+            },
+            .drop => blk: {
+                log.info("dropping message: session busy queue_mode=off session=0x{x}", .{session_hash});
+                break :blk .skip;
+            },
+            .process, .queue => .process,
+        };
     }
 
     pub const SessionSnapshot = struct {
@@ -3632,6 +3663,83 @@ test "session has correct initial state" {
     try testing.expect(!s.turn_running.load(.acquire));
     try testing.expect(!s.agent.has_system_prompt);
     try testing.expectEqual(@as(usize, 0), s.agent.historyLen());
+}
+
+test "drainInjection preserves pending message on allocation failure" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    const session = try sm.getOrCreate("inject:oom");
+    try session.injectMidTurn(testing.allocator, "retry me");
+
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    failing.fail_index = failing.alloc_index;
+
+    // Regression: mid-turn injection must not be dropped silently if the agent
+    // allocator cannot duplicate the buffered message.
+    try testing.expectError(error.OutOfMemory, session.drainInjection(testing.allocator, failing.allocator()));
+    try testing.expect(session.hasInjection());
+
+    const drained = (try session.drainInjection(testing.allocator, testing.allocator)).?;
+    defer testing.allocator.free(drained);
+    try testing.expectEqualStrings("retry me", drained);
+    try testing.expect(!session.hasInjection());
+}
+
+test "routeInput reports running session injection state" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    const session_key = "route:latest";
+    const session = try sm.getOrCreate(session_key);
+    session.agent.queue_mode = .latest;
+    session.turn_running.store(true, .release);
+    defer session.turn_running.store(false, .release);
+
+    try sm.injectMidTurn(session_key, "next message");
+    const input = sm.routeInput(session_key);
+    try testing.expect(input.turn_running);
+    try testing.expect(input.queue_mode == .latest);
+    try testing.expect(input.has_pending_injection);
+}
+
+test "routeInbound handles active session routing side effects" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    const session_key = "route:active";
+    const session = try sm.getOrCreate(session_key);
+    session.turn_running.store(true, .release);
+    defer session.turn_running.store(false, .release);
+
+    session.agent.queue_mode = .latest;
+    try testing.expectEqual(
+        SessionManager.InboundRouteAction.skip,
+        sm.routeInbound(session_key, "latest message"),
+    );
+    try testing.expect(sm.routeInput(session_key).has_pending_injection);
+    const drained = (try session.drainInjection(sm.allocator, testing.allocator)).?;
+    defer testing.allocator.free(drained);
+    try testing.expectEqualStrings("latest message", drained);
+
+    session.agent.queue_mode = .off;
+    try testing.expectEqual(
+        SessionManager.InboundRouteAction.skip,
+        sm.routeInbound(session_key, "drop message"),
+    );
+    try testing.expect(!sm.routeInput(session_key).has_pending_injection);
+
+    session.agent.queue_mode = .serial;
+    try testing.expectEqual(
+        SessionManager.InboundRouteAction.process,
+        sm.routeInbound(session_key, "queued message"),
+    );
 }
 
 test "requestTurnInterrupt signals only active sessions" {
