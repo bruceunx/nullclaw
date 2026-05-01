@@ -1182,6 +1182,18 @@ test "tailscaleTunnelWithAuth stores auth key" {
     try std.testing.expectEqualStrings("tskey-auth-k123", t.tailscale_auth_key.?);
 }
 
+test "tailscale auth rejects blank key before spawning" {
+    try std.testing.expectError(error.InvalidAuthKey, runTailscaleAuth(std.testing.allocator, " \t\r\n"));
+}
+
+test "tailscaleTunnelWithAuth rejects blank auth key before spawning" {
+    var t = tailscaleTunnelWithAuth(false, null, " \t\r\n");
+    t.allocator = std.testing.allocator;
+
+    try std.testing.expectError(error.AuthenticationFailed, t.start("localhost", 8080));
+    try std.testing.expectEqual(TunnelState.error_state, t.state);
+}
+
 test "ngrokTunnel with domain" {
     const t = ngrokTunnel("tok", "my.ngrok.io");
     try std.testing.expectEqualStrings("ngrok", t.providerName());
@@ -1332,6 +1344,14 @@ test "TailscaleTunnel adapter createWithAuth stores auth key" {
     try std.testing.expectEqualStrings("tskey-auth-k123", t.auth_key.?);
     const a = t.adapter();
     try std.testing.expect(!a.isRunning());
+}
+
+test "TailscaleTunnel adapter rejects blank auth key before spawning" {
+    var t = TailscaleTunnel.createWithAuth(std.testing.allocator, false, null, " \t\r\n");
+    const a = t.adapter();
+
+    try std.testing.expectError(TunnelAdapter.TunnelError.AuthenticationFailed, a.start(8080));
+    try std.testing.expectEqual(TunnelState.error_state, t.state);
 }
 
 test "CustomTunnel adapter name" {

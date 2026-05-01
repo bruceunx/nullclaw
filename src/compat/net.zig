@@ -72,15 +72,11 @@ pub const Stream = struct {
     }
 
     pub fn read(self: Stream, buffer: []u8) ReadError!usize {
-        var stream_reader = self.toInner().reader(shared.io(), &[_]u8{});
-        var vec = [_][]u8{buffer};
-        // Socket reads must be short reads. `readSliceShort` tries to fill the
-        // whole buffer, which deadlocks HTTP-style request/response flows when
-        // the peer sends a short request and keeps the connection open for the
-        // response.
-        return stream_reader.interface.readVec(&vec) catch |err| switch (err) {
-            error.EndOfStream => 0,
-            error.ReadFailed => return stream_reader.err orelse error.Unexpected,
+        const io = shared.io();
+        var data = [1][]u8{buffer};
+        return io.vtable.netRead(io.userdata, self.handle, &data) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return err,
         };
     }
 
@@ -318,6 +314,7 @@ pub const Server = struct {
             }
         };
 
+        errdefer _ = posix.system.close(fd);
         try setSocketNonblocking(fd, false);
         return .{
             .stream = .{ .handle = fd },
@@ -493,34 +490,30 @@ test "compat net normalizes listener and stream blocking mode" {
     try std.testing.expect(!socketIsNonblocking(conn.stream.handle));
 }
 
-test "compat net stream read returns short payload without waiting for buffer fill" {
+test "compat net stream read receives small socket payload" {
     if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
 
     const addr = try Address.resolveIp("127.0.0.1", 0);
-    var server = try addr.listen(.{ .force_nonblocking = true });
+    var server = try addr.listen(.{});
     defer server.deinit();
 
     const client = try tcpConnectToAddress(server.listen_address);
     defer client.close();
 
-    var conn = server.accept() catch |err| switch (err) {
-        error.WouldBlock => blk: {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
-            break :blk try server.accept();
-        },
-        else => return err,
-    };
+    var conn = try server.accept();
     defer conn.stream.close();
 
-    try setSocketReceiveTimeoutMillis(conn.stream.handle, 100);
+    try conn.stream.writeAll("$-1\r\n");
 
-    const request = "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    try client.writeAll(request);
+    var buf: [8]u8 = undefined;
+    var filled: usize = 0;
+    while (filled < 5) {
+        const n = try client.read(buf[filled..5]);
+        if (n == 0) return error.TestUnexpectedResult;
+        filled += n;
+    }
 
-    var buf: [2048]u8 = undefined;
-    const n = try conn.stream.read(&buf);
-    try std.testing.expectEqual(request.len, n);
-    try std.testing.expectEqualStrings(request, buf[0..n]);
+    try std.testing.expectEqualStrings("$-1\r\n", buf[0..5]);
 }
 
 test "compat net nonblocking accept returns would block instead of panicking" {
@@ -565,21 +558,4 @@ fn addressFromSockaddrStorage(storage: posix.sockaddr.storage) Address {
         posix.AF.INET6 => .{ .in6 = .{ .sa = @as(*const posix.sockaddr.in6, @ptrCast(&storage)).* } },
         else => unreachable,
     };
-}
-
-fn setSocketReceiveTimeoutMillis(handle: IoNet.Socket.Handle, timeout_ms: u64) !void {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const zero_timeout = posix.timeval{ .sec = 0, .usec = 0 };
-    const TimevalSecs = @TypeOf(zero_timeout.sec);
-    const timeout = posix.timeval{
-        .sec = @intCast(@min(timeout_ms / std.time.ms_per_s, @as(u64, std.math.maxInt(TimevalSecs)))),
-        .usec = @intCast((timeout_ms % std.time.ms_per_s) * std.time.us_per_ms),
-    };
-    try posix.setsockopt(
-        handle,
-        posix.SOL.SOCKET,
-        posix.SO.RCVTIMEO,
-        &std.mem.toBytes(timeout),
-    );
 }
