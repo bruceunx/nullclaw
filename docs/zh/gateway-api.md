@@ -15,12 +15,12 @@
 | `/health` | GET | 无 | 健康检查 |
 | `/pair` | POST | `X-Pairing-Code` | 用一次性配对码换取 bearer token（网关公开绑定时仅允许 loopback 客户端） |
 | `/webhook` | POST | `Authorization: Bearer <token>` | 发送消息：`{"message":"..."}` |
-| `/cron` | GET | 已存在配对 token 时需要 `Authorization: Bearer <token>` | 查看运行中 daemon 的实时 scheduler 任务 |
-| `/cron/add` | POST | 已存在配对 token 时需要 `Authorization: Bearer <token>` | 新增实时 cron 任务 |
-| `/cron/remove` | POST | 已存在配对 token 时需要 `Authorization: Bearer <token>` | 按 `id` 删除实时 cron 任务 |
-| `/cron/pause` | POST | 已存在配对 token 时需要 `Authorization: Bearer <token>` | 按 `id` 暂停实时 cron 任务 |
-| `/cron/resume` | POST | 已存在配对 token 时需要 `Authorization: Bearer <token>` | 按 `id` 恢复实时 cron 任务 |
-| `/cron/update` | POST | 已存在配对 token 时需要 `Authorization: Bearer <token>` | 部分更新实时 cron 任务 |
+| `/cron` | GET | 公开绑定时或已存在配对 token 时需要 `Authorization: Bearer <token>` | 查看运行中 daemon 的实时 scheduler 任务 |
+| `/cron/add` | POST | 公开绑定时或已存在配对 token 时需要 `Authorization: Bearer <token>` | 新增实时 cron 任务 |
+| `/cron/remove` | POST | 公开绑定时或已存在配对 token 时需要 `Authorization: Bearer <token>` | 按 `id` 删除实时 cron 任务 |
+| `/cron/pause` | POST | 公开绑定时或已存在配对 token 时需要 `Authorization: Bearer <token>` | 按 `id` 暂停实时 cron 任务 |
+| `/cron/resume` | POST | 公开绑定时或已存在配对 token 时需要 `Authorization: Bearer <token>` | 按 `id` 恢复实时 cron 任务 |
+| `/cron/update` | POST | 公开绑定时或已存在配对 token 时需要 `Authorization: Bearer <token>` | 部分更新实时 cron 任务 |
 | `/whatsapp` | GET | Query 参数 | Meta Webhook 验证 |
 | `/whatsapp` | POST | Meta 签名 | WhatsApp 入站消息 |
 | `/max` | POST | `X-Max-Bot-Api-Secret`（配置后必填） | Max 入站 webhook |
@@ -40,7 +40,7 @@ curl http://127.0.0.1:3000/health
 
 ```bash
 curl -X POST \
-  -H "X-Pairing-Code: 123456" \
+  -H "X-Pairing-Code: PAIRING_CODE" \
   http://127.0.0.1:3000/pair
 ```
 

@@ -1,7 +1,7 @@
 //! Shared HTTP utilities via curl subprocess.
 //!
 //! Replaces 9+ local `curlPost` / `curlGet` duplicates across the codebase.
-//! Uses curl to avoid Zig 0.15 std.http.Client segfaults.
+//! Uses curl to keep timeout handling explicit and avoid std.http regressions.
 
 const std = @import("std");
 const std_compat = @import("compat");
@@ -25,7 +25,7 @@ fn classifyCurlExitCode(code: u8) []const u8 {
     };
 }
 
-fn mapCurlExitCodeToError(code: u8) anyerror {
+pub fn mapCurlExitCodeToError(code: u8) anyerror {
     return switch (code) {
         6 => error.CurlDnsError,
         7 => error.CurlConnectError,
@@ -35,20 +35,47 @@ fn mapCurlExitCodeToError(code: u8) anyerror {
     };
 }
 
-fn duplicateTrimmedStderr(allocator: Allocator, raw: ?[]const u8) !?[]u8 {
-    const bytes = raw orelse return null;
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    if (trimmed.len == 0) return null;
-    return try allocator.dupe(u8, trimmed);
+const StderrCapture = struct {
+    file: ?std_compat.fs.File = null,
+    buffer: [MAX_CURL_STDERR_BYTES]u8 = undefined,
+    len: usize = 0,
+
+    fn trimmed(self: *const StderrCapture) ?[]const u8 {
+        const bytes = std.mem.trim(u8, self.buffer[0..self.len], " \t\r\n");
+        if (bytes.len == 0) return null;
+        return bytes;
+    }
+};
+
+fn stderrCaptureMain(ctx: *StderrCapture) void {
+    const file = ctx.file orelse return;
+    while (ctx.len < ctx.buffer.len) {
+        const n = file.read(ctx.buffer[ctx.len..]) catch return;
+        if (n == 0) return;
+        ctx.len += n;
+    }
+
+    // Keep draining after the retained buffer is full so a noisy child cannot
+    // block forever on a full stderr pipe while the parent waits on stdout.
+    var discard: [1024]u8 = undefined;
+    while (true) {
+        const n = file.read(&discard) catch return;
+        if (n == 0) return;
+    }
 }
 
-fn captureTrimmedStderr(allocator: Allocator, child: *std_compat.process.Child) ?[]u8 {
-    const raw = if (child.stderr) |stderr_file|
-        stderr_file.readToEndAlloc(allocator, MAX_CURL_STDERR_BYTES) catch null
-    else
-        null;
-    defer if (raw) |buf| allocator.free(buf);
-    return duplicateTrimmedStderr(allocator, raw) catch null;
+fn startStderrCapture(child: *std_compat.process.Child, capture: *StderrCapture) ?std.Thread {
+    capture.* = .{ .file = child.stderr };
+    if (capture.file == null) return null;
+    return std.Thread.spawn(.{}, stderrCaptureMain, .{capture}) catch null;
+}
+
+fn finishStderrCapture(thread_opt: *?std.Thread, capture: *const StderrCapture) ?[]const u8 {
+    if (thread_opt.*) |thread| {
+        thread.join();
+        thread_opt.* = null;
+    }
+    return capture.trimmed();
 }
 
 fn logCurlExitFailure(op: []const u8, code: u8, stderr_msg: ?[]const u8) void {
@@ -104,6 +131,53 @@ pub const HttpResponseWithHeaders = struct {
     status_code: u16,
     headers: []u8,
     body: []u8,
+};
+
+const proxy_env_var_names = [_][]const u8{
+    "http_proxy",
+    "HTTP_PROXY",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+};
+const http_proxy_env_var_names = [_][]const u8{
+    "http_proxy",
+    "HTTP_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+};
+const https_proxy_env_var_names = [_][]const u8{
+    "https_proxy",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+};
+
+pub const ProxyHttpClient = struct {
+    proxy_arena: std.heap.ArenaAllocator,
+    client: std.http.Client,
+
+    pub fn init(allocator: Allocator) !ProxyHttpClient {
+        var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer proxy_arena.deinit();
+
+        var client: std.http.Client = .{ .allocator = allocator, .io = std_compat.io() };
+        errdefer client.deinit();
+
+        try initClientDefaultProxies(&client, proxy_arena.allocator());
+
+        return .{
+            .proxy_arena = proxy_arena,
+            .client = client,
+        };
+    }
+
+    pub fn deinit(self: *ProxyHttpClient) void {
+        self.client.deinit();
+        self.proxy_arena.deinit();
+        self.* = undefined;
+    }
 };
 
 pub const SafeResolveEntryError = Allocator.Error || error{
@@ -322,6 +396,9 @@ fn curlRequestWithProxy(
         cancel_done.store(true, .release);
         if (cancel_watcher) |t| t.join();
     }
+    var stderr_capture = StderrCapture{};
+    var stderr_thread = startStderrCapture(&child, &stderr_capture);
+    defer if (stderr_thread) |thread| thread.join();
 
     if (child.stdin) |stdin_file| {
         stdin_file.writeAll(body) catch {
@@ -344,14 +421,15 @@ fn curlRequestWithProxy(
         _ = child.wait() catch {};
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlReadError;
     };
-    const stderr_msg = captureTrimmedStderr(allocator, &child);
-    defer if (stderr_msg) |msg| allocator.free(msg);
 
     const term = child.wait() catch |err| {
+        _ = child.kill() catch {};
+        const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
         logCurlWaitFailure(method, err, stderr_msg);
         allocator.free(stdout);
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlWaitError;
     };
+    const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
     switch (term) {
         .exited => |code| if (code != 0) {
             logCurlExitFailure(method, code, stderr_msg);
@@ -483,6 +561,9 @@ pub fn curlPostWithStatusAndTimeoutAndResolve(
         cancel_done.store(true, .release);
         if (cancel_watcher) |t| t.join();
     }
+    var stderr_capture = StderrCapture{};
+    var stderr_thread = startStderrCapture(&child, &stderr_capture);
+    defer if (stderr_thread) |thread| thread.join();
 
     if (child.stdin) |stdin_file| {
         stdin_file.writeAll(body) catch {
@@ -506,13 +587,14 @@ pub fn curlPostWithStatusAndTimeoutAndResolve(
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlReadError;
     };
     errdefer allocator.free(stdout);
-    const stderr_msg = captureTrimmedStderr(allocator, &child);
-    defer if (stderr_msg) |msg| allocator.free(msg);
 
     const term = child.wait() catch |err| {
+        _ = child.kill() catch {};
+        const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
         logCurlWaitFailure("POST", err, stderr_msg);
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlWaitError;
     };
+    const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
     switch (term) {
         .exited => |code| if (code != 0) {
             logCurlExitFailure("POST", code, stderr_msg);
@@ -625,6 +707,9 @@ pub fn curlPostWithStatusHeadersAndTimeoutAndResolve(
         cancel_done.store(true, .release);
         if (cancel_watcher) |t| t.join();
     }
+    var stderr_capture = StderrCapture{};
+    var stderr_thread = startStderrCapture(&child, &stderr_capture);
+    defer if (stderr_thread) |thread| thread.join();
 
     if (child.stdin) |stdin_file| {
         stdin_file.writeAll(body) catch {
@@ -648,13 +733,14 @@ pub fn curlPostWithStatusHeadersAndTimeoutAndResolve(
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlReadError;
     };
     errdefer allocator.free(stdout);
-    const stderr_msg = captureTrimmedStderr(allocator, &child);
-    defer if (stderr_msg) |msg| allocator.free(msg);
 
     const term = child.wait() catch |err| {
+        _ = child.kill() catch {};
+        const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
         logCurlWaitFailure("POST", err, stderr_msg);
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlWaitError;
     };
+    const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
     switch (term) {
         .exited => |code| if (code != 0) {
             logCurlExitFailure("POST", code, stderr_msg);
@@ -761,6 +847,9 @@ pub fn curlGetWithStatusAndTimeoutAndResolve(
         cancel_done.store(true, .release);
         if (cancel_watcher) |t| t.join();
     }
+    var stderr_capture = StderrCapture{};
+    var stderr_thread = startStderrCapture(&child, &stderr_capture);
+    defer if (stderr_thread) |thread| thread.join();
 
     const stdout = child.stdout.?.readToEndAlloc(allocator, DEFAULT_CURL_GET_MAX_BYTES) catch {
         _ = child.kill() catch {};
@@ -768,13 +857,14 @@ pub fn curlGetWithStatusAndTimeoutAndResolve(
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlReadError;
     };
     errdefer allocator.free(stdout);
-    const stderr_msg = captureTrimmedStderr(allocator, &child);
-    defer if (stderr_msg) |msg| allocator.free(msg);
 
     const term = child.wait() catch |err| {
+        _ = child.kill() catch {};
+        const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
         logCurlWaitFailure("GET", err, stderr_msg);
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlWaitError;
     };
+    const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
     switch (term) {
         .exited => |code| if (code != 0) {
             logCurlExitFailure("GET", code, stderr_msg);
@@ -879,19 +969,23 @@ fn curlGetWithProxyAndResolve(
         cancel_done.store(true, .release);
         if (cancel_watcher) |t| t.join();
     }
+    var stderr_capture = StderrCapture{};
+    var stderr_thread = startStderrCapture(&child, &stderr_capture);
+    defer if (stderr_thread) |thread| thread.join();
 
     const stdout = child.stdout.?.readToEndAlloc(allocator, max_bytes) catch {
         _ = child.kill() catch {};
         _ = child.wait() catch {};
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlReadError;
     };
-    const stderr_msg = captureTrimmedStderr(allocator, &child);
-    defer if (stderr_msg) |msg| allocator.free(msg);
 
     const term = child.wait() catch |err| {
+        _ = child.kill() catch {};
+        const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
         logCurlWaitFailure("GET", err, stderr_msg);
         return error.CurlWaitError;
     };
+    const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
     switch (term) {
         .exited => |code| if (code != 0) {
             logCurlExitFailure("GET", code, stderr_msg);
@@ -951,7 +1045,8 @@ pub fn curlGetMaxBytes(
 }
 
 /// Read proxy URL from standard environment variables.
-/// Checks HTTPS_PROXY, HTTP_PROXY, ALL_PROXY in that order.
+/// Checks https_proxy/HTTPS_PROXY first, then http_proxy/HTTP_PROXY,
+/// then all_proxy/ALL_PROXY.
 /// Returns null if no proxy is set.
 /// Caller owns returned memory.
 var proxy_override_value: ?[]u8 = null;
@@ -983,25 +1078,79 @@ fn normalizeProxyEnvValue(allocator: Allocator, val: []const u8) !?[]const u8 {
     return try allocator.dupe(u8, trimmed);
 }
 
-pub fn getProxyFromEnv(allocator: Allocator) !?[]const u8 {
-    {
-        proxy_override_mutex.lock();
-        defer proxy_override_mutex.unlock();
-        if (proxy_override_value) |override| {
-            return try allocator.dupe(u8, override);
+fn applyProxyOverrideToEnvMap(env_map: *std_compat.process.EnvMap) !bool {
+    proxy_override_mutex.lock();
+    defer proxy_override_mutex.unlock();
+
+    const override = proxy_override_value orelse return false;
+    for (proxy_env_var_names) |key| {
+        try env_map.put(key, override);
+    }
+    return true;
+}
+
+fn putProxyEnvVarFromProcess(
+    env_map: *std_compat.process.EnvMap,
+    allocator: Allocator,
+    key: []const u8,
+) !void {
+    if (std_compat.process.getEnvVarOwned(allocator, key)) |raw_value| {
+        defer allocator.free(raw_value);
+        if (try normalizeProxyEnvValue(allocator, raw_value)) |proxy| {
+            try env_map.put(key, proxy);
+        }
+    } else |_| {}
+}
+
+fn buildProxyEnvMapFromProcess(allocator: Allocator) !std_compat.process.EnvMap {
+    var env_map = std_compat.process.EnvMap.init(allocator);
+    errdefer env_map.deinit();
+
+    for (proxy_env_var_names) |key| {
+        try putProxyEnvVarFromProcess(&env_map, allocator, key);
+    }
+    _ = try applyProxyOverrideToEnvMap(&env_map);
+
+    return env_map;
+}
+
+fn getProxyFromEnvMap(
+    allocator: Allocator,
+    env_map: *const std_compat.process.EnvMap,
+    env_vars: []const []const u8,
+) !?[]const u8 {
+    for (env_vars) |var_name| {
+        const raw_value = env_map.get(var_name) orelse continue;
+        if (try normalizeProxyEnvValue(allocator, raw_value)) |proxy| {
+            return proxy;
         }
     }
-
-    const env_vars = [_][]const u8{ "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY" };
-    for (env_vars) |var_name| {
-        if (std_compat.process.getEnvVarOwned(allocator, var_name)) |val| {
-            errdefer allocator.free(val);
-            const out = try normalizeProxyEnvValue(allocator, val);
-            allocator.free(val);
-            if (out) |proxy| return proxy;
-        } else |_| {}
-    }
     return null;
+}
+
+fn initClientDefaultProxiesFromEnvMap(
+    client: *std.http.Client,
+    arena: Allocator,
+    env_map: *const std_compat.process.EnvMap,
+) !void {
+    var merged_env_map = try env_map.clone(arena);
+    _ = try applyProxyOverrideToEnvMap(&merged_env_map);
+    try client.initDefaultProxies(arena, &merged_env_map);
+}
+
+pub fn initClientDefaultProxies(client: *std.http.Client, arena: Allocator) !void {
+    var env_map = try buildProxyEnvMapFromProcess(arena);
+    try client.initDefaultProxies(arena, &env_map);
+}
+
+pub fn getProxyFromEnv(allocator: Allocator) !?[]const u8 {
+    var env_map = try buildProxyEnvMapFromProcess(allocator);
+    defer env_map.deinit();
+
+    if (try getProxyFromEnvMap(allocator, &env_map, &https_proxy_env_var_names)) |proxy| {
+        return proxy;
+    }
+    return try getProxyFromEnvMap(allocator, &env_map, &http_proxy_env_var_names);
 }
 
 /// HTTP GET via curl for SSE (Server-Sent Events).
@@ -1054,20 +1203,24 @@ pub fn curlGetSSE(
         cancel_done.store(true, .release);
         if (cancel_watcher) |t| t.join();
     }
+    var stderr_capture = StderrCapture{};
+    var stderr_thread = startStderrCapture(&child, &stderr_capture);
+    defer if (stderr_thread) |thread| thread.join();
 
     const stdout = child.stdout.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch {
         _ = child.kill() catch {};
         _ = child.wait() catch {};
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlReadError;
     };
-    const stderr_msg = captureTrimmedStderr(allocator, &child);
-    defer if (stderr_msg) |msg| allocator.free(msg);
 
     const term = child.wait() catch |err| {
+        _ = child.kill() catch {};
+        const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
         logCurlWaitFailure("GET-SSE", err, stderr_msg);
         allocator.free(stdout);
         return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlWaitError;
     };
+    const stderr_msg = finishStderrCapture(&stderr_thread, &stderr_capture);
     switch (term) {
         .exited => |code| {
             if (code != 0) {
@@ -1186,15 +1339,22 @@ test "curl exit code mapping returns specific errors" {
     try std.testing.expect(mapCurlExitCodeToError(22) == error.CurlFailed);
 }
 
-test "duplicateTrimmedStderr returns trimmed stderr" {
-    const copied = (try duplicateTrimmedStderr(std.testing.allocator, "\n curl: (6) Could not resolve host \n")).?;
-    defer std.testing.allocator.free(copied);
-    try std.testing.expectEqualStrings("curl: (6) Could not resolve host", copied);
+test "StderrCapture returns trimmed stderr" {
+    var capture = StderrCapture{};
+    const raw = "\n curl: (6) Could not resolve host \n";
+    @memcpy(capture.buffer[0..raw.len], raw);
+    capture.len = raw.len;
+
+    try std.testing.expectEqualStrings("curl: (6) Could not resolve host", capture.trimmed().?);
 }
 
-test "duplicateTrimmedStderr ignores empty stderr" {
-    try std.testing.expect((try duplicateTrimmedStderr(std.testing.allocator, " \n\t ")) == null);
-    try std.testing.expect((try duplicateTrimmedStderr(std.testing.allocator, null)) == null);
+test "StderrCapture ignores empty stderr" {
+    var capture = StderrCapture{};
+    const raw = " \n\t ";
+    @memcpy(capture.buffer[0..raw.len], raw);
+    capture.len = raw.len;
+
+    try std.testing.expect(capture.trimmed() == null);
 }
 
 test "normalizeProxyEnvValue trims surrounding whitespace" {
@@ -1244,4 +1404,55 @@ test "setProxyOverride accepts long proxy URLs" {
     defer if (from_override) |v| allocator.free(v);
     try std.testing.expect(from_override != null);
     try std.testing.expectEqual(long_proxy.len, from_override.?.len);
+}
+
+test "getProxyFromEnvMap honors lowercase https_proxy before http_proxy" {
+    var env_map = std_compat.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+
+    try env_map.put("http_proxy", "http://http-only.example:8080");
+    try env_map.put("https_proxy", "https://secure.example:8443");
+
+    const proxy = try getProxyFromEnvMap(std.testing.allocator, &env_map, &https_proxy_env_var_names);
+    defer if (proxy) |value| std.testing.allocator.free(value);
+
+    try std.testing.expect(proxy != null);
+    try std.testing.expectEqualStrings("https://secure.example:8443", proxy.?);
+}
+
+test "applyProxyOverrideToEnvMap overwrites existing proxy values" {
+    var env_map = std_compat.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+
+    try env_map.put("HTTPS_PROXY", "https://old.example:9443");
+    try setProxyOverride("  socks5://override.example:1080  ");
+    defer setProxyOverride(null) catch unreachable;
+
+    try std.testing.expect(try applyProxyOverrideToEnvMap(&env_map));
+    try std.testing.expectEqualStrings("socks5://override.example:1080", env_map.get("HTTPS_PROXY").?);
+    try std.testing.expectEqualStrings("socks5://override.example:1080", env_map.get("http_proxy").?);
+}
+
+test "initClientDefaultProxiesFromEnvMap parses proxy settings" {
+    var env_map = std_compat.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+
+    try env_map.put("http_proxy", "http://proxy-http.example:8080");
+    try env_map.put("HTTPS_PROXY", "https://proxy-https.example:8443");
+
+    var proxy_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer proxy_arena.deinit();
+
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    defer client.deinit();
+
+    // Regression: Zig 0.16 requires an explicit environ map for initDefaultProxies.
+    try initClientDefaultProxiesFromEnvMap(&client, proxy_arena.allocator(), &env_map);
+
+    try std.testing.expect(client.http_proxy != null);
+    try std.testing.expect(client.https_proxy != null);
+    try std.testing.expectEqual(@as(u16, 8080), client.http_proxy.?.port);
+    try std.testing.expectEqual(@as(u16, 8443), client.https_proxy.?.port);
+    try std.testing.expect(client.http_proxy.?.host.eql(try std.Io.net.HostName.init("proxy-http.example")));
+    try std.testing.expect(client.https_proxy.?.host.eql(try std.Io.net.HostName.init("proxy-https.example")));
 }

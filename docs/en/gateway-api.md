@@ -29,12 +29,12 @@ Default gateway endpoint: `http://127.0.0.1:3000`
 | `/health` | GET | None | Health check |
 | `/pair` | POST | `X-Pairing-Code` | Exchange one-time pairing code for bearer token (loopback-only when gateway is publicly bound) |
 | `/webhook` | POST | `Authorization: Bearer <token>` | Send message payload: `{"message":"..."}` |
-| `/cron` | GET | `Authorization: Bearer <token>` when pairing tokens exist | List live scheduler jobs from the running daemon |
-| `/cron/add` | POST | `Authorization: Bearer <token>` when pairing tokens exist | Add or schedule a live cron job |
-| `/cron/remove` | POST | `Authorization: Bearer <token>` when pairing tokens exist | Remove a live cron job by `id` |
-| `/cron/pause` | POST | `Authorization: Bearer <token>` when pairing tokens exist | Pause a live cron job by `id` |
-| `/cron/resume` | POST | `Authorization: Bearer <token>` when pairing tokens exist | Resume a live cron job by `id` |
-| `/cron/update` | POST | `Authorization: Bearer <token>` when pairing tokens exist | Partially update a live cron job |
+| `/cron` | GET | `Authorization: Bearer <token>` on public binds or when pairing tokens exist | List live scheduler jobs from the running daemon |
+| `/cron/add` | POST | `Authorization: Bearer <token>` on public binds or when pairing tokens exist | Add or schedule a live cron job |
+| `/cron/remove` | POST | `Authorization: Bearer <token>` on public binds or when pairing tokens exist | Remove a live cron job by `id` |
+| `/cron/pause` | POST | `Authorization: Bearer <token>` on public binds or when pairing tokens exist | Pause a live cron job by `id` |
+| `/cron/resume` | POST | `Authorization: Bearer <token>` on public binds or when pairing tokens exist | Resume a live cron job by `id` |
+| `/cron/update` | POST | `Authorization: Bearer <token>` on public binds or when pairing tokens exist | Partially update a live cron job |
 | `/whatsapp` | GET | Query params | Meta webhook verification |
 | `/whatsapp` | POST | Meta signature | WhatsApp inbound webhook |
 | `/max` | POST | `X-Max-Bot-Api-Secret` when configured | Max inbound webhook delivery |
@@ -54,7 +54,7 @@ curl http://127.0.0.1:3000/health
 
 ```bash
 curl -X POST \
-  -H "X-Pairing-Code: 123456" \
+  -H "X-Pairing-Code: PAIRING_CODE" \
   http://127.0.0.1:3000/pair
 ```
 

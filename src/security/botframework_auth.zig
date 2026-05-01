@@ -428,12 +428,19 @@ fn parseJwtClaims(allocator: Allocator, json_bytes: []const u8) VerifyError!JwtC
     const exp = jsonObjectInt(obj, "exp") orelse return error.MissingRequiredClaim;
     const aud_value = obj.get("aud") orelse return error.MissingRequiredClaim;
 
+    const iss_owned = try allocator.dupe(u8, iss);
+    errdefer allocator.free(iss_owned);
+    const service_url_owned = try allocator.dupe(u8, service_url);
+    errdefer allocator.free(service_url_owned);
+    const audience = try parseAudience(allocator, aud_value);
+    errdefer audience.deinit(allocator);
+
     return .{
-        .iss = try allocator.dupe(u8, iss),
-        .service_url = try allocator.dupe(u8, service_url),
+        .iss = iss_owned,
+        .service_url = service_url_owned,
         .nbf = nbf,
         .exp = exp,
-        .audience = try parseAudience(allocator, aud_value),
+        .audience = audience,
     };
 }
 
@@ -510,7 +517,6 @@ fn jsonObjectInt(object: std.json.ObjectMap, key: []const u8) ?i64 {
     const value = object.get(key) orelse return null;
     return switch (value) {
         .integer => |integer| integer,
-        .float => |float| @intFromFloat(float),
         else => null,
     };
 }
@@ -616,6 +622,16 @@ test "verifyConnectorTokenAt rejects expired token" {
             "https://smba.trafficmanager.net/amer/",
             "msteams",
             1_900_000_301,
+        ),
+    );
+}
+
+test "parseJwtClaims rejects floating numeric dates" {
+    try std.testing.expectError(
+        error.MissingRequiredClaim,
+        parseJwtClaims(
+            std.testing.allocator,
+            "{\"iss\":\"https://api.botframework.com\",\"aud\":\"test-app-id\",\"serviceUrl\":\"https://smba.trafficmanager.net/amer/\",\"nbf\":1700000000.5,\"exp\":1900000000}",
         ),
     );
 }
