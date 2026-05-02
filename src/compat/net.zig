@@ -96,35 +96,13 @@ pub const Stream = struct {
     }
 
     pub fn write(self: Stream, bytes: []const u8) WriteError!usize {
+        const io = shared.io();
         var total: usize = 0;
         while (total < bytes.len) {
-            if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) {
-                const io = shared.io();
-                var data = [1][]const u8{bytes[total..]};
-                const n = try io.vtable.netWrite(io.userdata, self.handle, &.{}, &data, 1);
-                if (n == 0) return error.Unexpected;
-                total += n;
-            } else {
-                const rc = posix.system.sendto(self.handle, bytes.ptr + total, bytes.len - total, posix.MSG.NOSIGNAL, null, 0);
-                switch (posix.errno(rc)) {
-                    .SUCCESS => {
-                        const n: usize = @intCast(rc);
-                        if (n == 0) return error.Unexpected;
-                        total += n;
-                    },
-                    .INTR => continue,
-                    .ALREADY => return error.FastOpenAlreadyInProgress,
-                    .CONNRESET => return error.ConnectionResetByPeer,
-                    .CONNREFUSED => return error.ConnectionRefused,
-                    .NOBUFS, .NOMEM => return error.SystemResources,
-                    .PIPE, .NOTCONN => return error.SocketUnconnected,
-                    .AFNOSUPPORT => return error.AddressFamilyUnsupported,
-                    .HOSTUNREACH => return error.HostUnreachable,
-                    .NETUNREACH => return error.NetworkUnreachable,
-                    .NETDOWN => return error.NetworkDown,
-                    else => |err| return posix.unexpectedErrno(err),
-                }
-            }
+            var data = [1][]const u8{bytes[total..]};
+            const n = try io.vtable.netWrite(io.userdata, self.handle, "", &data, 1);
+            if (n == 0) return error.Unexpected;
+            total += n;
         }
         return total;
     }
