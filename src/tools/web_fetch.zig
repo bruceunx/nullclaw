@@ -703,6 +703,16 @@ test "formatExtractedText keeps UTF-8 intact when truncating" {
     try testing.expect(std.mem.indexOf(u8, formatted, "[Content truncated at 100 chars") != null);
 }
 
+test "formatExtractedText wraps external content" {
+    const allocator = std.testing.allocator;
+    const formatted = try formatExtractedText(allocator, "page body", 1000);
+    defer allocator.free(formatted);
+
+    try testing.expect(std.mem.indexOf(u8, formatted, "<<<UNTRUSTED_EXTERNAL_CONTENT id=\"") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "Source: Web Fetch") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "page body") != null);
+}
+
 test "decodeEntity" {
     try testing.expectEqual(@as(u8, '&'), decodeEntity("&amp;").?);
     try testing.expectEqual(@as(u8, '<'), decodeEntity("&lt;").?);
